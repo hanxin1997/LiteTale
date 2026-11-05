@@ -171,7 +171,9 @@ void main() {
           }
           await tester.tap(find.text('返回'));
           await tester.pump();
-          if (!enabled) await tester.pump(const Duration(milliseconds: 300));
+          // Normal routes retain their reverse animation and are removed on
+          // the following overlay frame. E Ink still asserts immediate removal.
+          if (!enabled) await tester.pumpAndSettle();
           await tester.pump();
           expect(completed, isTrue);
           expect(result, 7);
@@ -371,6 +373,9 @@ void main() {
       expect(find.text('正在加载 75%'), findsOneWidget);
       expect(tester.takeException(), isNull);
       await preference.setEnabled(false);
+      await tester.pump();
+      // Bloc's broadcast arrives in a microtask; allow dependent widgets to
+      // build their restored children without settling an infinite spinner.
       await tester.pump();
       // Android's original AppLoadingIndicator uses the expressive shape;
       // only the two explicit circular children return to the circular widget.

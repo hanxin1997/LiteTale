@@ -1,7 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
 
-import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -15,9 +14,8 @@ import 'package:wild/settings/settings_theme.dart';
 import 'package:wild/theme/imported_font_theme.dart';
 
 void main() {
-  setUp(() => debugDefaultTargetPlatformOverride = TargetPlatform.android);
-  tearDown(() => debugDefaultTargetPlatformOverride = null);
-
+  // Platform variants restore Flutter's debug override before its invariant
+  // checks; an ordinary tearDown runs too late for testWidgets.
   testWidgets('Android switch waits for saving and can restore normal mode', (
     tester,
   ) async {
@@ -54,7 +52,7 @@ void main() {
     expect(preferences.state, isFalse);
     expect(stored, ['true', 'false']);
     expect(tester.takeException(), isNull);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
   testWidgets('missing optional provider leaves old standalone hosts disabled', (
     tester,
@@ -79,23 +77,23 @@ void main() {
     expect(find.text('motion:false'), findsOneWidget);
     expect(find.text('墨水屏模式'), findsNothing);
     expect(tester.takeException(), isNull);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
-  testWidgets('iOS and desktop ignore even an enabled stored preference', (
-    tester,
-  ) async {
-    final preferences = EInkPreferencesCubit(read: () async => 'true');
-    addTearDown(preferences.close);
-    await preferences.initialize();
-    expect(preferences.state, isTrue);
-    for (final platform in [
-      TargetPlatform.iOS,
-      TargetPlatform.macOS,
-      TargetPlatform.windows,
-      TargetPlatform.linux,
-      TargetPlatform.fuchsia,
-    ]) {
-      debugDefaultTargetPlatformOverride = platform;
+  for (final platform in [
+    TargetPlatform.iOS,
+    TargetPlatform.macOS,
+    TargetPlatform.windows,
+    TargetPlatform.linux,
+    TargetPlatform.fuchsia,
+  ]) {
+    testWidgets('$platform ignores even an enabled stored preference', (
+      tester,
+    ) async {
+      // Give each platform a fresh preference and mounted widget tree.
+      final preferences = EInkPreferencesCubit(read: () async => 'true');
+      addTearDown(preferences.close);
+      await preferences.initialize();
+      expect(preferences.state, isTrue);
       await tester.pumpWidget(
         BlocProvider.value(
           value: preferences,
@@ -120,8 +118,8 @@ void main() {
       expect(find.text('motion:false'), findsOneWidget);
       expect(find.text('墨水屏模式'), findsNothing);
       expect(tester.takeException(), isNull, reason: '$platform');
-    }
-  });
+    }, variant: TargetPlatformVariant.only(platform));
+  }
 
   testWidgets('scope preserves route state, scrolling physics and inertia', (
     tester,
@@ -194,7 +192,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('打开列表'), findsOneWidget);
     expect(tester.takeException(), isNull);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
   testWidgets('disabled scope preserves the host reduced-motion preference', (
     tester,
@@ -213,7 +211,7 @@ void main() {
       ),
     );
     expect(find.text('host-motion:true'), findsOneWidget);
-  });
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
   test('high-contrast theme preserves imported typography and regional glyphs', () {
     final source = ThemeData.dark().copyWith(
