@@ -41,5 +41,7 @@
 - [x] 完成workflow、校验工具与文档。
 - [x] 配置固定私有签名：两项 GitHub encrypted secrets 已写入，本机 DPAPI 加密备份位于 `%LOCALAPPDATA%\LiteTale\signing\hanxin1997-LiteTale.dpapi`，未进入源码。
 - [x] 本地APK校验工具 11 项合成测试通过；墨水屏改动与CI已叠加独立检出，Git差异检查无空白错误。
-- [ ] 提交并推送 main。
+- [x] 提交并推送 main：初始提交 `f70841d`，Actions run `42037676603` 已由 push 自动触发。
 - [ ] 跟踪云端测试、构建和Release结果。
+
+首轮云端分析发现新图片测试使用旧版本 decoder callback 参数；改为 Flutter 3.29 的 `getTargetSize` 参数后重跑。同步加入 artifact overwrite，确保重跑相同任务不会因同名产物失败。

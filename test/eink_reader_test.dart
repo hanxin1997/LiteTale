@@ -284,7 +284,7 @@ void main() {
         final complete = Completer<void>();
         var emitted = 0;
         final stream = provider.loadImage(provider, (
-          buffer, {cacheWidth, cacheHeight, allowUpscaling = false}
+          ui.ImmutableBuffer buffer, {ui.TargetImageSizeCallback? getTargetSize}
         ) async {
           buffer.dispose();
           return codec;
