@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:flutter/material.dart';
@@ -35,7 +36,7 @@ class NovelDownloadInfoPage extends StatelessWidget {
                 return AppIconButton(
                   icon: const Icon(Icons.delete_outline),
                   onPressed: () async {
-                    final confirmed = await showAdaptiveDialog<bool>(
+                    final confirmed = await showEinkAwareDialog<bool>(
                       context: context,
                       builder:
                           (context) => AlertDialog.adaptive(

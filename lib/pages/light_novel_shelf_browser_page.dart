@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_progress_indicator.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'dart:async';
 import 'dart:io';
@@ -231,7 +232,7 @@ class _LightNovelShelfBrowserPageState
       ),
       body: Column(
         children: [
-          if (_loading) const LinearProgressIndicator(),
+          if (_loading) const EInkProgressIndicator(child: LinearProgressIndicator(),),
           Expanded(
             child:
                 _error != null

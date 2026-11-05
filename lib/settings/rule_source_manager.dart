@@ -1,3 +1,5 @@
+import 'package:wild/eink/eink_overlays.dart';
+import 'package:wild/eink/eink_progress_indicator.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:wild/widgets/source_website.dart';
@@ -110,7 +112,7 @@ class _RuleSourceManagerState extends State<RuleSourceManager> {
         case 'enable':
           await registry.setEnabled(id, !entry.enabled);
         case 'remove':
-          final yes = await showAdaptiveDialog<bool>(
+          final yes = await showEinkAwareDialog<bool>(
             context: context,
             builder:
                 (ctx) => AlertDialog.adaptive(
@@ -183,7 +185,7 @@ class _RuleSourceManagerState extends State<RuleSourceManager> {
             if (busy)
               usesAppleGlass
                   ? const Center(child: AppLoadingIndicator(size: 24))
-                  : const LinearProgressIndicator(),
+                  : const EInkProgressIndicator(child: LinearProgressIndicator(),),
             if (registry.warning != null)
               Padding(
                 padding: const EdgeInsets.all(16),
@@ -247,7 +249,7 @@ Future<String?> _input(
 }) async {
   final controller = TextEditingController(text: initial);
   try {
-    return await showAdaptiveDialog<String>(
+    return await showEinkAwareDialog<String>(
       context: context,
       builder:
           (ctx) => AlertDialog.adaptive(

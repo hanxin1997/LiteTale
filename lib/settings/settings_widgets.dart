@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:flutter/material.dart';
@@ -274,7 +275,7 @@ Future<T?> chooseSetting<T>(
   String title,
   Map<T, String> options,
   T selected,
-) => showAdaptiveDialog<T>(
+) => showEinkAwareDialog<T>(
   context: context,
   builder:
       (context) => AlertDialog.adaptive(

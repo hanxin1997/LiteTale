@@ -31,6 +31,8 @@ import '../methods.dart';
 import 'package:wild/settings/settings_preferences.dart';
 import 'package:wild/settings/reading_statistics.dart';
 import 'package:wild/settings/app_logs.dart';
+import 'package:wild/eink/eink_preferences.dart';
+import 'package:wild/eink/eink_progress_indicator.dart';
 
 class InitPage extends StatefulWidget {
   const InitPage({super.key});
@@ -77,6 +79,8 @@ class _InitPageState extends State<InitPage> {
       context.read<AppAccentCubit>().load(),
       context.read<ReaderCurlCubit>().load(),
       context.read<SettingsPreferencesCubit>().initialize(),
+      if (context.read<EInkPreferencesCubit?>() case final eink?)
+        eink.initialize(),
       context.read<ReadingStatisticsCubit>().initialize(),
       AppLogs.instance.initialize(root),
       fontSizeCubit.loadFontSize(),
@@ -134,7 +138,9 @@ class _InitPageState extends State<InitPage> {
               const SizedBox(
                 width: 24,
                 height: 24,
-                child: CircularProgressIndicator(strokeWidth: 2),
+                child: EInkProgressIndicator(
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
               ),
             ],
           ),

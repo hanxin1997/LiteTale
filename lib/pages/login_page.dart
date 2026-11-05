@@ -1,3 +1,5 @@
+import 'package:wild/eink/eink_overlays.dart';
+import 'package:wild/eink/eink_progress_indicator.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:flutter/material.dart';
 import 'package:wild/widgets/app_color_settings.dart';
@@ -98,7 +100,7 @@ class _LoginPageState extends State<LoginPage> {
   }
 
   Future<void> _onRegisterPressed() async {
-    final result = await showAdaptiveDialog<bool>(
+    final result = await showEinkAwareDialog<bool>(
       context: context,
       builder:
           (context) => AlertDialog.adaptive(
@@ -273,7 +275,7 @@ class _LoginPageState extends State<LoginPage> {
                             return const SizedBox(
                               width: 200,
                               height: 50,
-                              child: Center(child: CircularProgressIndicator()),
+                              child: Center(child: EInkProgressIndicator(child: CircularProgressIndicator(),)),
                             );
                           case CheckcodeStatus.success:
                             if (state.checkcode == null ||
@@ -361,8 +363,10 @@ class _LoginPageState extends State<LoginPage> {
                                     ? const SizedBox(
                                       width: 24,
                                       height: 24,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
+                                      child: EInkProgressIndicator(
+                                        child: CircularProgressIndicator(
+                                          strokeWidth: 2,
+                                        ),
                                       ),
                                     )
                                     : const Text('登录'),

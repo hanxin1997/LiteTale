@@ -1,5 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:wild/eink/eink_preferences.dart';
+import 'package:wild/eink/eink_scope.dart';
 import 'package:wild/widgets/theme_reveal_host.dart';
 
 void main() {
@@ -133,4 +136,41 @@ void main() {
     expect(mode.value, ThemeMode.light);
     expect(tester.takeException(), isNull);
   });
+
+  testWidgets('enabling E Ink clears an in-flight theme overlay', (
+    tester,
+  ) async {
+    final preference = EInkPreferencesCubit(write: (_) async {});
+    final hostKey = GlobalKey<ThemeRevealHostState>();
+    final triggerKey = GlobalKey();
+    var changed = 0;
+    addTearDown(preference.close);
+    await tester.pumpWidget(BlocProvider.value(
+      value: preference,
+      child: MaterialApp(
+        home: EInkScope(
+          child: ThemeRevealHost(
+            key: hostKey,
+            child: Scaffold(body: Center(child: Text('页面', key: triggerKey))),
+          ),
+        ),
+      ),
+    ));
+    await tester.pumpAndSettle();
+    final completed = hostKey.currentState!.revealFrom(
+      triggerContext: triggerKey.currentContext!,
+      changeTheme: () => changed++,
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 32));
+    expect(find.byKey(const ValueKey('theme-reveal-overlay')), findsOneWidget);
+
+    await preference.setEnabled(true);
+    await tester.pump();
+    await tester.pump();
+    await completed;
+    expect(changed, 1);
+    expect(find.byKey(const ValueKey('theme-reveal-overlay')), findsNothing);
+    expect(tester.takeException(), isNull);
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 }

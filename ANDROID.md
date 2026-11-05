@@ -1,5 +1,28 @@
 # LiteTale Android development
 
+## Push-to-release builds for this fork
+
+The `Android Release` workflow builds each push to `main` in
+`hanxin1997/LiteTale`; it also supports **Actions → Android Release → Run workflow**.
+It runs Dart analysis and Flutter tests, builds ARM64 and x86_64 APKs, signs and
+validates them, then publishes a formal GitHub Release with checksums. A failed
+check prevents publication; diagnostic logs remain in the Actions run.
+
+Versions come from `pubspec.yaml`. The CI build number is `100000 + run_number`,
+and the release tag is `v<version>+android.<build-number>`. Re-running a workflow
+uses the same tag. The older multi-platform `Release` workflow remains manual.
+
+Signing uses repository secrets `LITETALE_ANDROID_KEYSTORE_BASE64` (PKCS#12) and
+`LITETALE_ANDROID_KEYSTORE_PASSWORD`. Keep this private key stable: replacing it
+prevents upgrades over earlier builds. It is never included in build artifacts.
+The first fork APK cannot overwrite an upstream APK with a different signature;
+back up reading data before changing installations. Subsequent fork builds use
+the same signature and increasing version codes.
+
+Download these builds from [this fork's releases](https://github.com/hanxin1997/LiteTale/releases).
+The in-app updater still points to the upstream project. Cloud build checks do
+not replace physical e-paper device testing.
+
 Android uses the existing Wild Flutter/Rust reader with selectable Wenku8 and LightNovelShelf sources. The UI
 uses Material 3, Android wallpaper colors (Android 12+), a violet fallback palette and six selectable accents,
 system UI fonts, rounded cards, and a phone-friendly login form. The Android

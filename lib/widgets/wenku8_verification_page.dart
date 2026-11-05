@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_progress_indicator.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'dart:async';
 import 'dart:convert';
@@ -252,8 +253,10 @@ class _Wenku8VerificationPageState extends State<Wenku8VerificationPage> {
                           _extractingHome
                               ? const SizedBox.square(
                                 dimension: 18,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
+                                child: EInkProgressIndicator(
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
                                 ),
                               )
                               : const Icon(Icons.check_rounded),

@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_progress_indicator.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:flutter/material.dart';
@@ -374,7 +375,9 @@ class _CategoryPageState extends State<CategoryPage> {
                   child: SizedBox(
                     width: 16,
                     height: 16,
-                    child: CircularProgressIndicator(strokeWidth: 2),
+                    child: EInkProgressIndicator(
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    ),
                   ),
                 ),
             ],
@@ -508,7 +511,9 @@ class _CategoryPageState extends State<CategoryPage> {
                           return const Center(
                             child: Padding(
                               padding: EdgeInsets.all(16.0),
-                              child: CircularProgressIndicator(),
+                              child: EInkProgressIndicator(
+                                child: CircularProgressIndicator(),
+                              ),
                             ),
                           );
                         }

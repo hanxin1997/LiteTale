@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_progress_indicator.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -198,7 +199,9 @@ class _CfActionLoaderState extends State<CfActionLoader> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              CircularProgressIndicator(),
+              EInkProgressIndicator(
+                child: CircularProgressIndicator(),
+              ),
               SizedBox(height: 16),
               Text(
                 '正在处理，请稍候...',

@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:flutter/material.dart';
@@ -26,7 +27,7 @@ class HistoryPage extends StatelessWidget {
             icon: const Icon(Icons.delete_outline_rounded),
             onPressed: () async {
               final source = cubit.historySource;
-              final confirm = await showAdaptiveDialog<bool>(
+              final confirm = await showEinkAwareDialog<bool>(
                 context: context,
                 builder:
                     (context) => AlertDialog.adaptive(
@@ -149,7 +150,7 @@ class _HistoryItem extends StatelessWidget {
           }
         },
         onLongPress: () {
-          showAdaptiveDialog(
+          showEinkAwareDialog(
             context: context,
             builder:
                 (dialogContext) => AlertDialog.adaptive(

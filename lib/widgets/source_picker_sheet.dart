@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:wild/eink/eink_policy.dart';
 import 'package:wild/cubits/api_host_cubit.dart';
 import 'package:wild/sources/book_source.dart';
 import 'package:wild/sources/source_website.dart';
@@ -34,7 +35,7 @@ Future<SourceId?> showSourcePicker(
           ),
     );
   }
-  return showModalBottomSheet<SourceId>(
+  return showAppBottomSheet<SourceId>(
     context: context,
     isScrollControlled: true,
     useSafeArea: true,
@@ -55,6 +56,7 @@ class _SourceChoices extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context), colors = theme.colorScheme;
+    final eink = einkEnabled(context);
     return SafeArea(
       top: false,
       child: SizedBox(
@@ -162,7 +164,18 @@ class _SourceChoices extends StatelessWidget {
                                         colors.surfaceContainerHigh,
                                         .08,
                                       ),
-                              borderRadius: BorderRadius.circular(20),
+                              borderRadius:
+                                  eink ? null : BorderRadius.circular(20),
+                              shape:
+                                  eink
+                                      ? RoundedRectangleBorder(
+                                        borderRadius: BorderRadius.circular(20),
+                                        side: BorderSide(
+                                          color: Colors.black,
+                                          width: active ? 2 : 1,
+                                        ),
+                                      )
+                                      : null,
                               clipBehavior: Clip.antiAlias,
                               child: tile,
                             ),

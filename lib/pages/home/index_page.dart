@@ -2,6 +2,9 @@ import 'package:wild/widgets/platform_controls.dart';
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:wild/eink/eink_navigation.dart';
+import 'package:wild/eink/eink_policy.dart';
+import 'package:wild/eink/eink_progress_indicator.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:wild/pages/auth_cubit.dart';
@@ -31,8 +34,9 @@ class IndexPage extends StatefulWidget {
 }
 
 class _IndexPageState extends State<IndexPage>
-    with SingleTickerProviderStateMixin {
-  late final TabController _tabController;
+    with TickerProviderStateMixin {
+  late TabController _tabController;
+  bool _einkActive = false;
   final _themeButtonKey = GlobalKey();
 
   @override
@@ -42,8 +46,26 @@ class _IndexPageState extends State<IndexPage>
     _tabController.addListener(_tabsChanged);
   }
 
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final enabled = einkEnabled(context);
+    if (enabled == _einkActive) return;
+    final index = _tabController.index;
+    _tabController.dispose();
+    _einkActive = enabled;
+    // Replacing only the controller makes the existing TabBarView jump to its
+    // final page. Its lazy children and all previously visited state survive.
+    _tabController = TabController(
+      length: 4,
+      initialIndex: index,
+      animationDuration: enabled ? Duration.zero : null,
+      vsync: this,
+    )..addListener(_tabsChanged);
+  }
+
   void _tabsChanged() {
-    if (mounted && usesAppleGlass) setState(() {});
+    if (mounted && (usesAppleGlass || _einkActive)) setState(() {});
   }
 
   void _openSources() => Navigator.push(
@@ -99,6 +121,18 @@ class _IndexPageState extends State<IndexPage>
   }
 
   Widget _buildDiscoveryTabs(BuildContext context) {
+    if (_einkActive) {
+      return EInkTabStrip(
+        labels: [
+          '推荐',
+          '分类',
+          activeSource.value == SourceId.huanmeng ? '完结' : '排行',
+          activeSource.value == SourceId.wenku8 ? '完结' : '全部',
+        ],
+        selectedIndex: _tabController.index,
+        onSelected: _tabController.animateTo,
+      );
+    }
     final colors = Theme.of(context).colorScheme;
     final tabs = TabBar(
       controller: _tabController,
@@ -205,10 +239,12 @@ class _IndexPageState extends State<IndexPage>
                             : Icons.dark_mode_rounded,
                       ),
                       tooltip:
-                          Theme.of(context).brightness == Brightness.dark
+                          _einkActive
+                              ? '墨水屏模式使用浅色显示'
+                              : Theme.of(context).brightness == Brightness.dark
                               ? '切换浅色模式'
                               : '切换深色模式',
-                      onPressed: _switchTheme,
+                      onPressed: _einkActive ? null : _switchTheme,
                     )
                   else
                     AppIconButton(
@@ -306,6 +342,10 @@ class _IndexPageState extends State<IndexPage>
                     (context, _) => TabBarView(
                       key: ValueKey((activeSource.value, sourceRevision.value)),
                       controller: _tabController,
+                      physics:
+                          _einkActive
+                              ? const NeverScrollableScrollPhysics()
+                              : null,
                       children:
                           activeSource.value == SourceId.wenku8
                               ? const [
@@ -577,7 +617,9 @@ class _ToplistPageState extends State<ToplistPage> {
                           return const Center(
                             child: Padding(
                               padding: EdgeInsets.all(16.0),
-                              child: CircularProgressIndicator(),
+                              child: EInkProgressIndicator(
+                                child: CircularProgressIndicator(),
+                              ),
                             ),
                           );
                         }
@@ -733,7 +775,9 @@ class _ArticlelistPageState extends State<ArticlelistPage> {
                 return const Center(
                   child: Padding(
                     padding: EdgeInsets.all(16.0),
-                    child: CircularProgressIndicator(),
+                    child: EInkProgressIndicator(
+                      child: CircularProgressIndicator(),
+                    ),
                   ),
                 );
               }

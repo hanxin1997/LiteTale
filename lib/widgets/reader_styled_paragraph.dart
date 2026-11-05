@@ -11,35 +11,59 @@ class ReaderStyledParagraph extends LeafRenderObjectWidget {
     required this.fragment,
     required this.style,
     required this.textScaler,
+    this.highContrast = false,
   });
   final ReaderFragment fragment;
   final TextStyle style;
   final TextScaler textScaler;
+  final bool highContrast;
 
   @override
   RenderObject createRenderObject(BuildContext context) =>
-      _StyledParagraphBox(fragment, style, textScaler);
+      _StyledParagraphBox(fragment, style, textScaler, highContrast);
 
   @override
   void updateRenderObject(
     BuildContext context,
     covariant RenderBox renderObject,
   ) =>
-      (renderObject as _StyledParagraphBox).update(fragment, style, textScaler);
+      (renderObject as _StyledParagraphBox).update(
+        fragment,
+        style,
+        textScaler,
+        highContrast,
+      );
 }
 
 class _StyledParagraphBox extends RenderBox {
-  _StyledParagraphBox(this._fragment, this._style, this._scaler);
+  _StyledParagraphBox(
+    this._fragment,
+    this._style,
+    this._scaler,
+    this._highContrast,
+  );
   ReaderFragment _fragment;
   TextStyle _style;
   TextScaler _scaler;
+  bool _highContrast;
   ReaderParagraphLayout? _layout;
 
-  void update(ReaderFragment fragment, TextStyle style, TextScaler scaler) {
-    if (fragment == _fragment && style == _style && scaler == _scaler) return;
+  void update(
+    ReaderFragment fragment,
+    TextStyle style,
+    TextScaler scaler,
+    bool highContrast,
+  ) {
+    if (fragment == _fragment &&
+        style == _style &&
+        scaler == _scaler &&
+        highContrast == _highContrast) {
+      return;
+    }
     _fragment = fragment;
     _style = style;
     _scaler = scaler;
+    _highContrast = highContrast;
     markNeedsLayout();
     markNeedsSemanticsUpdate();
   }
@@ -52,6 +76,7 @@ class _StyledParagraphBox extends RenderBox {
       baseStyle: _style,
       width: constraints.maxWidth,
       textScaler: _scaler,
+      highContrast: _highContrast,
     );
     size = constraints.constrain(
       Size(

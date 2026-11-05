@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_progress_indicator.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:flutter/material.dart';
 import 'package:wild/widgets/book_grid_delegate.dart';
@@ -82,7 +83,9 @@ class _ArticlelistPageState extends State<ArticlelistPage> {
                           return const Center(
                             child: Padding(
                               padding: EdgeInsets.all(16.0),
-                              child: CircularProgressIndicator(),
+                              child: EInkProgressIndicator(
+                                child: CircularProgressIndicator(),
+                              ),
                             ),
                           );
                         }

@@ -31,6 +31,7 @@ import 'package:wild/pages/novel/auto_scroll_config_cubit.dart';
 import 'package:wild/utils/controller_event.dart';
 import 'package:wild/widgets/reader_volume_turn_scope.dart';
 import 'package:wild/widgets/reader_volume_turn_setting.dart';
+import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/theme/app_fonts.dart';
 import 'package:wild/cubits/font_settings_cubit.dart';
 import 'dart:io';
@@ -794,7 +795,7 @@ class _ReaderSettings extends StatelessWidget {
       Color initialColor,
       Function(Color) onColorChanged,
     ) {
-      showAdaptiveDialog(
+      showEinkAwareDialog(
         context: context,
         builder: (BuildContext context) {
           Color pickerColor = initialColor;

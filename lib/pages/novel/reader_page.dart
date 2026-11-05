@@ -1,5 +1,8 @@
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:flutter/material.dart';
+import 'package:wild/eink/eink_policy.dart';
+import 'package:wild/eink/eink_reader_view.dart';
+import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/services/hardware_turn_buffer.dart';
 import 'package:wild/cubits/volume_control_cubit.dart';
 import 'package:wild/widgets/wenku8_recovery_button.dart';
@@ -96,6 +99,7 @@ class ReaderPage extends StatelessWidget {
                   rightPaddingCubit: rightPaddingCubit,
                   fontSettingsCubit: context.read<FontSettingsCubit>(),
                   readerTheme: () => context.read<ThemeCubit>().state,
+                  einkMode: () => einkEnabled(context, listen: false),
                   layoutReady: ReaderSystemUiScope.layoutReadyOf(context),
                 )..loadChapter(
                   initialPage: initialPage,
@@ -202,6 +206,8 @@ class _ReaderViewState extends State<_ReaderView> {
   late ReaderPageController _pageController;
   final _curlKey = GlobalKey<PageCurlViewState>();
   bool _wasCurlEnabled = false;
+  bool _wasEinkEnabled = false;
+  bool? _lastEinkEnabled;
   Size? _lastLayoutSize;
   EdgeInsets? _lastLayoutPadding;
   TextScaler? _lastTextScaler;
@@ -211,13 +217,21 @@ class _ReaderViewState extends State<_ReaderView> {
   double _boundaryOverscroll = 0;
   var preTime = 0;
 
+  ReaderLoaded get _loadedState {
+    if (!einkEnabled(context, listen: false)) return widget.state;
+    // Multiple hardware events may arrive before the next widget build. Read
+    // the committed cubit index so each static turn advances exactly one view.
+    final current = context.read<ReaderCubit>().state;
+    return current is ReaderLoaded ? current : widget.state;
+  }
+
   int get _viewIndex =>
-      widget.state.layout.viewIndex(widget.state.currentPageIndex);
+      _loadedState.layout.viewIndex(_loadedState.currentPageIndex);
   int get _viewCount =>
-      widget.state.layout.viewCount(widget.state.pages.length);
+      _loadedState.layout.viewCount(_loadedState.pages.length);
 
   void _onViewChanged(int index) => context.read<ReaderCubit>().onPageChanged(
-    widget.state.layout.firstPage(index),
+    _loadedState.layout.firstPage(index),
   );
 
   /// The open book owns its image policy. Read the book id from the cubit so a
@@ -225,13 +239,16 @@ class _ReaderViewState extends State<_ReaderView> {
   SourceId get _bookSource => sourceOf(context.read<ReaderCubit>().initialAid);
 
   bool get _curlEnabled =>
+      !einkEnabled(context, listen: false) &&
       !Platform.isIOS &&
       _bookSource != SourceId.localEpub &&
       context.read<ReaderCurlCubit>().state &&
       !MediaQuery.of(context).disableAnimations;
 
   bool get _isTurning =>
-      _curlEnabled
+      einkEnabled(context, listen: false)
+          ? context.read<ReaderCubit>().state is! ReaderLoaded
+          : _curlEnabled
           ? (_curlKey.currentState?.isTurning ?? false)
           : _pageController.isTurning;
 
@@ -395,10 +412,24 @@ class _ReaderViewState extends State<_ReaderView> {
   }
 
   void _turnPage(int direction, {double? startY}) {
-    if (_curlEnabled) {
+    if (einkEnabled(context, listen: false)) {
+      final target = _viewIndex + direction;
+      if (target >= 0 && target < _viewCount) _onViewChanged(target);
+    } else if (_curlEnabled) {
       _curlKey.currentState?.turn(direction, startY: startY);
     } else {
       _pageController.turn(direction);
+    }
+  }
+
+  void _onStaticTurn(int direction) {
+    if (_isTurning) return;
+    ReadingSessionScope.recordActivity(context);
+    final target = _viewIndex + direction;
+    if (target < 0 || target >= _viewCount) {
+      _handleBoundaryTurn(direction);
+    } else {
+      _turnPage(direction);
     }
   }
 
@@ -465,21 +496,24 @@ class _ReaderViewState extends State<_ReaderView> {
         color: textColor,
       ),
       paragraphSpacing: context.read<ParagraphSpacingCubit>().state,
+      highContrast: einkEnabled(context, listen: false),
     );
   }
 
-  void _syncCurlMode(bool enabled) {
-    if (_wasCurlEnabled && !enabled) {
+  void _syncCurlMode(bool enabled, bool eink) {
+    if ((_wasCurlEnabled && !enabled) || (_wasEinkEnabled && !eink)) {
       final old = _pageController;
       _pageController = ReaderPageController(initialPage: _viewIndex);
       WidgetsBinding.instance.addPostFrameCallback((_) => old.dispose());
     }
     _wasCurlEnabled = enabled;
+    _wasEinkEnabled = eink;
   }
 
   @override
   Widget build(BuildContext context) {
     final mediaQuery = MediaQuery.of(context);
+    final eink = einkEnabled(context);
     final preferences = settingsPreferencesOf(context);
     final hanChanged =
         _lastHanVariant != null && _lastHanVariant != preferences.hanVariant;
@@ -519,22 +553,29 @@ class _ReaderViewState extends State<_ReaderView> {
       isDarkMode = mediaQuery.platformBrightness == Brightness.dark;
     }
     final backgroundColor =
-        isDarkMode
+        eink
+            ? Colors.white
+            : isDarkMode
             ? themeCubit.state.darkBackgroundColor
             : themeCubit.state.lightBackgroundColor;
     final textColor =
-        isDarkMode
+        eink
+            ? Colors.black
+            : isDarkMode
             ? themeCubit.state.darkTextColor
             : themeCubit.state.lightTextColor;
     if (widget.state.pages.first.cssPage != null &&
         _lastPaperColor != null &&
-        (_lastPaperColor != backgroundColor || _lastTextColor != textColor)) {
+        (_lastPaperColor != backgroundColor ||
+            _lastTextColor != textColor ||
+            _lastEinkEnabled != eink)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (mounted) context.read<ReaderCubit>().reloadCurrentPage();
       });
     }
     _lastPaperColor = backgroundColor;
     _lastTextColor = textColor;
+    _lastEinkEnabled = eink;
 
     // Never squeeze pages laid out for the previous orientation into half a
     // leaf. Repagination creates a fresh view and cancels any active curl.
@@ -550,7 +591,10 @@ class _ReaderViewState extends State<_ReaderView> {
         return BlocBuilder<ReaderBackgroundCubit, ReaderBackgroundState>(
           builder: (context, backgroundState) {
             String? backgroundImagePath;
-            if (isDarkMode) {
+            if (eink) {
+              // Effective paper is independent of the user's saved artwork.
+              backgroundImagePath = null;
+            } else if (isDarkMode) {
               backgroundImagePath =
                   context.read<ReaderBackgroundCubit>().getDarkBackgroundPath();
             } else {
@@ -592,11 +636,25 @@ class _ReaderViewState extends State<_ReaderView> {
                     child: BlocBuilder<ReaderCurlCubit, bool>(
                       builder: (context, enabled) {
                         final curlEnabled =
+                            !eink &&
                             !Platform.isIOS &&
                             _bookSource != SourceId.localEpub &&
                             enabled &&
                             !mediaQuery.disableAnimations;
-                        _syncCurlMode(curlEnabled);
+                        _syncCurlMode(curlEnabled, eink);
+                        if (eink) {
+                          // No PageView/scroll position exists in this branch:
+                          // every input uses the cubit's same page and history.
+                          return EInkReaderView(
+                            onTapUp: _handleTap,
+                            onTurn: _onStaticTurn,
+                            child: _buildReaderPage(
+                              context,
+                              _viewIndex,
+                              textColor,
+                            ),
+                          );
+                        }
                         if (curlEnabled) {
                           final curl = PageCurlView(
                             leafCount: widget.state.pages.length,
@@ -649,7 +707,18 @@ class _ReaderViewState extends State<_ReaderView> {
                       left: 0,
                       right: 0,
                       child: Container(
-                        color: Colors.black.withValues(alpha: 0.7),
+                        decoration: BoxDecoration(
+                          color:
+                              eink
+                                  ? Colors.white
+                                  : Colors.black.withValues(alpha: 0.7),
+                          border:
+                              eink
+                                  ? const Border(
+                                    bottom: BorderSide(color: Colors.black),
+                                  )
+                                  : null,
+                        ),
                         padding: EdgeInsets.fromLTRB(
                           16,
                           topPadding + 8,
@@ -659,17 +728,17 @@ class _ReaderViewState extends State<_ReaderView> {
                         child: Row(
                           children: [
                             AppIconButton(
-                              icon: const Icon(
+                              icon: Icon(
                                 Icons.arrow_back,
-                                color: Colors.white,
+                                color: eink ? Colors.black : Colors.white,
                               ),
                               onPressed: () => Navigator.pop(context),
                             ),
                             Expanded(
                               child: Text(
                                 widget.title,
-                                style: const TextStyle(
-                                  color: Colors.white,
+                                style: TextStyle(
+                                  color: eink ? Colors.black : Colors.white,
                                   fontSize: 18,
                                 ),
                                 maxLines: 1,
@@ -677,16 +746,16 @@ class _ReaderViewState extends State<_ReaderView> {
                               ),
                             ),
                             AppIconButton(
-                              icon: const Icon(
+                              icon: Icon(
                                 Icons.menu_book,
-                                color: Colors.white,
+                                color: eink ? Colors.black : Colors.white,
                               ),
                               onPressed: _showChapterList,
                             ),
                             AppIconButton(
-                              icon: const Icon(
+                              icon: Icon(
                                 Icons.settings,
-                                color: Colors.white,
+                                color: eink ? Colors.black : Colors.white,
                               ),
                               onPressed: _showSettings,
                             ),
@@ -952,7 +1021,7 @@ class _ReaderSettingsState extends State<_ReaderSettings> {
     Color initialColor,
     Function(Color) onColorChanged,
   ) {
-    showAdaptiveDialog(
+    showEinkAwareDialog(
       context: context,
       builder: (BuildContext context) {
         Color pickerColor = initialColor;
@@ -994,6 +1063,7 @@ class _ReaderSettingsState extends State<_ReaderSettings> {
   Widget build(BuildContext context) {
     return BlocBuilder<ThemeCubit, ReaderTheme>(
       builder: (context, theme) {
+        final eink = einkEnabled(context);
         return Container(
           height: MediaQuery.of(context).size.height / 3 * 2,
           padding: EdgeInsets.only(
@@ -1013,38 +1083,46 @@ class _ReaderSettingsState extends State<_ReaderSettings> {
               ),
               const SizedBox(height: 16),
               // 阅读器类型设置
-              Row(
-                children: [
-                  Text('阅读器类型'),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: BlocBuilder<ReaderTypeCubit, ReaderType>(
-                      builder: (context, type) {
-                        return AppSegmentedButton<ReaderType>(
-                          segments: const [
-                            ButtonSegment<ReaderType>(
-                              value: ReaderType.normal,
-                              label: Text('普通阅读器'),
-                              icon: Icon(Icons.book),
-                            ),
-                            ButtonSegment<ReaderType>(
-                              value: ReaderType.html,
-                              label: Text('HTML阅读器'),
-                              icon: Icon(Icons.html),
-                            ),
-                          ],
-                          selected: {type},
-                          onSelectionChanged: (Set<ReaderType> types) async {
-                            await readerTypeCubit.updateType(types.first);
-                          },
-                        );
-                      },
+              if (eink)
+                const ListTile(
+                  leading: Icon(Icons.menu_book_outlined),
+                  title: Text('墨水屏分页阅读'),
+                  subtitle: Text('当前使用静态整页；关闭墨水屏模式并重新打开书籍后恢复原阅读器'),
+                )
+              else
+                Row(
+                  children: [
+                    Text('阅读器类型'),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: BlocBuilder<ReaderTypeCubit, ReaderType>(
+                        builder: (context, type) {
+                          return AppSegmentedButton<ReaderType>(
+                            segments: const [
+                              ButtonSegment<ReaderType>(
+                                value: ReaderType.normal,
+                                label: Text('普通阅读器'),
+                                icon: Icon(Icons.book),
+                              ),
+                              ButtonSegment<ReaderType>(
+                                value: ReaderType.html,
+                                label: Text('HTML阅读器'),
+                                icon: Icon(Icons.html),
+                              ),
+                            ],
+                            selected: {type},
+                            onSelectionChanged: (Set<ReaderType> types) async {
+                              await readerTypeCubit.updateType(types.first);
+                            },
+                          );
+                        },
+                      ),
                     ),
-                  ),
-                ],
-              ),
+                  ],
+                ),
               const Divider(),
-              if (sourceOf(widget.readerCubit.initialAid) != SourceId.localEpub)
+              if (eink ||
+                  sourceOf(widget.readerCubit.initialAid) != SourceId.localEpub)
                 const ReaderCurlSetting()
               else
                 const ListTile(
@@ -1225,289 +1303,297 @@ class _ReaderSettingsState extends State<_ReaderSettings> {
               ),
               const Divider(),
               // 主题模式选择
-              Row(
-                children: [
-                  Text('主题模式', style: TextStyle()),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: AppSegmentedButton<ReaderThemeMode>(
-                      segments: const [
-                        ButtonSegment<ReaderThemeMode>(
-                          value: ReaderThemeMode.auto,
-                          label: Text('自动'),
-                          icon: Icon(Icons.brightness_auto),
+              if (eink)
+                const ListTile(
+                  leading: Icon(Icons.contrast),
+                  title: Text('白底黑字'),
+                  subtitle: Text('墨水屏模式暂停纸色和背景图；原主题与背景设置已保留'),
+                )
+              else ...[
+                Row(
+                  children: [
+                    Text('主题模式', style: TextStyle()),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: AppSegmentedButton<ReaderThemeMode>(
+                        segments: const [
+                          ButtonSegment<ReaderThemeMode>(
+                            value: ReaderThemeMode.auto,
+                            label: Text('自动'),
+                            icon: Icon(Icons.brightness_auto),
+                          ),
+                          ButtonSegment<ReaderThemeMode>(
+                            value: ReaderThemeMode.light,
+                            label: Text('浅色'),
+                            icon: Icon(Icons.light_mode),
+                          ),
+                          ButtonSegment<ReaderThemeMode>(
+                            value: ReaderThemeMode.dark,
+                            label: Text('深色'),
+                            icon: Icon(Icons.dark_mode),
+                          ),
+                        ],
+                        selected: {theme.themeMode},
+                        onSelectionChanged: (Set<ReaderThemeMode> modes) async {
+                          await context.read<ThemeCubit>().setThemeMode(
+                            modes.first,
+                          );
+                          await widget.readerCubit.reloadCurrentPage();
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                // 浅色主题颜色设置
+                Row(
+                  children: [
+                    Text('浅色主题', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: AppButton.outlinedIcon(
+                        icon: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: theme.lightBackgroundColor,
+                            border: Border.all(color: Colors.grey),
+                            shape: BoxShape.circle,
+                          ),
                         ),
-                        ButtonSegment<ReaderThemeMode>(
-                          value: ReaderThemeMode.light,
-                          label: Text('浅色'),
-                          icon: Icon(Icons.light_mode),
+                        label: const Text('背景颜色'),
+                        onPressed:
+                            () => _showColorPicker(
+                              context,
+                              theme.lightBackgroundColor,
+                              (color) async {
+                                await context
+                                    .read<ThemeCubit>()
+                                    .updateLightBackgroundColor(color);
+                                await widget.readerCubit.reloadCurrentPage();
+                              },
+                            ),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: AppButton.outlinedIcon(
+                        icon: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: theme.lightTextColor,
+                            border: Border.all(color: Colors.grey),
+                            shape: BoxShape.circle,
+                          ),
                         ),
-                        ButtonSegment<ReaderThemeMode>(
-                          value: ReaderThemeMode.dark,
-                          label: Text('深色'),
-                          icon: Icon(Icons.dark_mode),
+                        label: const Text('文字颜色'),
+                        onPressed:
+                            () => _showColorPicker(
+                              context,
+                              theme.lightTextColor,
+                              (color) async {
+                                await context
+                                    .read<ThemeCubit>()
+                                    .updateLightTextColor(color);
+                                await widget.readerCubit.reloadCurrentPage();
+                              },
+                            ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                // 深色主题颜色设置
+                Row(
+                  children: [
+                    Text('深色主题', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: AppButton.outlinedIcon(
+                        icon: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: theme.darkBackgroundColor,
+                            border: Border.all(color: Colors.grey),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        label: const Text('背景颜色'),
+                        onPressed:
+                            () => _showColorPicker(
+                              context,
+                              theme.darkBackgroundColor,
+                              (color) async {
+                                await context
+                                    .read<ThemeCubit>()
+                                    .updateDarkBackgroundColor(color);
+                                await widget.readerCubit.reloadCurrentPage();
+                              },
+                            ),
+                      ),
+                    ),
+                    const SizedBox(width: 16),
+                    Expanded(
+                      child: AppButton.outlinedIcon(
+                        icon: Container(
+                          width: 24,
+                          height: 24,
+                          decoration: BoxDecoration(
+                            color: theme.darkTextColor,
+                            border: Border.all(color: Colors.grey),
+                            shape: BoxShape.circle,
+                          ),
+                        ),
+                        label: const Text('文字颜色'),
+                        onPressed:
+                            () => _showColorPicker(context, theme.darkTextColor, (
+                              color,
+                            ) async {
+                              await context
+                                  .read<ThemeCubit>()
+                                  .updateDarkTextColor(color);
+                              await widget.readerCubit.reloadCurrentPage();
+                            }),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                // 背景透明度设置
+                BlocBuilder<ReaderBackgroundCubit, ReaderBackgroundState>(
+                  builder: (context, backgroundState) {
+                    return Row(
+                      children: [
+                        Text('背景透明度'),
+                        Expanded(
+                          child: AppSlider(
+                            value: backgroundState.opacity,
+                            min: 0.0,
+                            max: 1.0,
+                            divisions: 25,
+                            label: '${(backgroundState.opacity * 100).round()}%',
+                            onChanged: (value) async {
+                              await readerBackgroundCubit.updateOpacity(value);
+                              await widget.readerCubit.reloadCurrentPage();
+                            },
+                          ),
+                        ),
+                        Text(
+                          '${(backgroundState.opacity * 100).round()}%',
+                          style: TextStyle(),
                         ),
                       ],
-                      selected: {theme.themeMode},
-                      onSelectionChanged: (Set<ReaderThemeMode> modes) async {
-                        await context.read<ThemeCubit>().setThemeMode(
-                          modes.first,
-                        );
-                        await widget.readerCubit.reloadCurrentPage();
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              // 浅色主题颜色设置
-              Row(
-                children: [
-                  Text('浅色主题', style: TextStyle(fontWeight: FontWeight.bold)),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: AppButton.outlinedIcon(
-                      icon: Container(
-                        width: 24,
-                        height: 24,
-                        decoration: BoxDecoration(
-                          color: theme.lightBackgroundColor,
-                          border: Border.all(color: Colors.grey),
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      label: const Text('背景颜色'),
-                      onPressed:
-                          () => _showColorPicker(
-                            context,
-                            theme.lightBackgroundColor,
-                            (color) async {
-                              await context
-                                  .read<ThemeCubit>()
-                                  .updateLightBackgroundColor(color);
-                              await widget.readerCubit.reloadCurrentPage();
-                            },
-                          ),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: AppButton.outlinedIcon(
-                      icon: Container(
-                        width: 24,
-                        height: 24,
-                        decoration: BoxDecoration(
-                          color: theme.lightTextColor,
-                          border: Border.all(color: Colors.grey),
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      label: const Text('文字颜色'),
-                      onPressed:
-                          () => _showColorPicker(
-                            context,
-                            theme.lightTextColor,
-                            (color) async {
-                              await context
-                                  .read<ThemeCubit>()
-                                  .updateLightTextColor(color);
-                              await widget.readerCubit.reloadCurrentPage();
-                            },
-                          ),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              // 深色主题颜色设置
-              Row(
-                children: [
-                  Text('深色主题', style: TextStyle(fontWeight: FontWeight.bold)),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: AppButton.outlinedIcon(
-                      icon: Container(
-                        width: 24,
-                        height: 24,
-                        decoration: BoxDecoration(
-                          color: theme.darkBackgroundColor,
-                          border: Border.all(color: Colors.grey),
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      label: const Text('背景颜色'),
-                      onPressed:
-                          () => _showColorPicker(
-                            context,
-                            theme.darkBackgroundColor,
-                            (color) async {
-                              await context
-                                  .read<ThemeCubit>()
-                                  .updateDarkBackgroundColor(color);
-                              await widget.readerCubit.reloadCurrentPage();
-                            },
-                          ),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: AppButton.outlinedIcon(
-                      icon: Container(
-                        width: 24,
-                        height: 24,
-                        decoration: BoxDecoration(
-                          color: theme.darkTextColor,
-                          border: Border.all(color: Colors.grey),
-                          shape: BoxShape.circle,
-                        ),
-                      ),
-                      label: const Text('文字颜色'),
-                      onPressed:
-                          () => _showColorPicker(context, theme.darkTextColor, (
-                            color,
-                          ) async {
-                            await context
-                                .read<ThemeCubit>()
-                                .updateDarkTextColor(color);
-                            await widget.readerCubit.reloadCurrentPage();
-                          }),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              // 背景透明度设置
-              BlocBuilder<ReaderBackgroundCubit, ReaderBackgroundState>(
-                builder: (context, backgroundState) {
-                  return Row(
-                    children: [
-                      Text('背景透明度'),
-                      Expanded(
-                        child: AppSlider(
-                          value: backgroundState.opacity,
-                          min: 0.0,
-                          max: 1.0,
-                          divisions: 25,
-                          label: '${(backgroundState.opacity * 100).round()}%',
-                          onChanged: (value) async {
-                            await readerBackgroundCubit.updateOpacity(value);
-                            await widget.readerCubit.reloadCurrentPage();
-                          },
-                        ),
-                      ),
-                      Text(
-                        '${(backgroundState.opacity * 100).round()}%',
-                        style: TextStyle(),
-                      ),
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 16),
-              // 背景图片设置
-              Row(
-                children: [
-                  Text('背景图片设置', style: TextStyle(fontWeight: FontWeight.bold)),
-                ],
-              ),
-              const SizedBox(height: 8),
-              BlocBuilder<ReaderBackgroundCubit, ReaderBackgroundState>(
-                builder: (context, backgroundState) {
-                  return Column(
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: AppButton.outlinedIcon(
-                              icon: Icon(
-                                backgroundState.lightBackgroundExists
-                                    ? Icons.image
-                                    : Icons.add_photo_alternate,
+                    );
+                  },
+                ),
+                const SizedBox(height: 16),
+                // 背景图片设置
+                Row(
+                  children: [
+                    Text('背景图片设置', style: TextStyle(fontWeight: FontWeight.bold)),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                BlocBuilder<ReaderBackgroundCubit, ReaderBackgroundState>(
+                  builder: (context, backgroundState) {
+                    return Column(
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: AppButton.outlinedIcon(
+                                icon: Icon(
+                                  backgroundState.lightBackgroundExists
+                                      ? Icons.image
+                                      : Icons.add_photo_alternate,
+                                ),
+                                label: Text(
+                                  backgroundState.lightBackgroundExists
+                                      ? '更新浅色背景'
+                                      : '设置浅色背景',
+                                ),
+                                onPressed: () async {
+                                  await readerBackgroundCubit
+                                      .updateLightBackground();
+                                  await widget.readerCubit.reloadCurrentPage();
+                                },
                               ),
-                              label: Text(
-                                backgroundState.lightBackgroundExists
-                                    ? '更新浅色背景'
-                                    : '设置浅色背景',
+                            ),
+                            const SizedBox(width: 8),
+                            if (backgroundState.lightBackgroundExists)
+                              AppButton.outlinedIcon(
+                                icon: const Icon(Icons.delete),
+                                label: const Text('删除'),
+                                onPressed: () async {
+                                  await readerBackgroundCubit
+                                      .deleteLightBackground();
+                                  await widget.readerCubit.reloadCurrentPage();
+                                },
                               ),
-                              onPressed: () async {
-                                await readerBackgroundCubit
-                                    .updateLightBackground();
-                                await widget.readerCubit.reloadCurrentPage();
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          if (backgroundState.lightBackgroundExists)
-                            AppButton.outlinedIcon(
-                              icon: const Icon(Icons.delete),
-                              label: const Text('删除'),
-                              onPressed: () async {
-                                await readerBackgroundCubit
-                                    .deleteLightBackground();
-                                await widget.readerCubit.reloadCurrentPage();
-                              },
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: AppButton.outlinedIcon(
-                              icon: Icon(
-                                backgroundState.darkBackgroundExists
-                                    ? Icons.image
-                                    : Icons.add_photo_alternate,
+                          ],
+                        ),
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: AppButton.outlinedIcon(
+                                icon: Icon(
+                                  backgroundState.darkBackgroundExists
+                                      ? Icons.image
+                                      : Icons.add_photo_alternate,
+                                ),
+                                label: Text(
+                                  backgroundState.darkBackgroundExists
+                                      ? '更新深色背景'
+                                      : '设置深色背景',
+                                ),
+                                onPressed: () async {
+                                  await readerBackgroundCubit
+                                      .updateDarkBackground();
+                                  await widget.readerCubit.reloadCurrentPage();
+                                },
                               ),
-                              label: Text(
-                                backgroundState.darkBackgroundExists
-                                    ? '更新深色背景'
-                                    : '设置深色背景',
+                            ),
+                            const SizedBox(width: 8),
+                            if (backgroundState.darkBackgroundExists)
+                              AppButton.outlinedIcon(
+                                icon: const Icon(Icons.delete),
+                                label: const Text('删除'),
+                                onPressed: () async {
+                                  await readerBackgroundCubit
+                                      .deleteDarkBackground();
+                                  await widget.readerCubit.reloadCurrentPage();
+                                },
                               ),
-                              onPressed: () async {
-                                await readerBackgroundCubit
-                                    .updateDarkBackground();
-                                await widget.readerCubit.reloadCurrentPage();
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          if (backgroundState.darkBackgroundExists)
-                            AppButton.outlinedIcon(
-                              icon: const Icon(Icons.delete),
-                              label: const Text('删除'),
-                              onPressed: () async {
-                                await readerBackgroundCubit
-                                    .deleteDarkBackground();
-                                await widget.readerCubit.reloadCurrentPage();
-                              },
-                            ),
-                        ],
-                      ),
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 16),
+                          ],
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                const SizedBox(height: 16),
+              ],
               // 重置按钮
               AppButton.text(
                 onPressed: () async {
-                  await context.read<ThemeCubit>().resetToDefault();
+                  if (!eink) await context.read<ThemeCubit>().resetToDefault();
                   await topBarHeightCubit.updateHeight(56);
                   await bottomBarHeightCubit.updateHeight(56);
                   await leftPaddingCubit.updatePadding(16);
                   await rightPaddingCubit.updatePadding(16);
                   await widget.readerCubit.reloadCurrentPage();
                 },
-                child: const Text('重置为默认'),
+                child: Text(eink ? '重置阅读边距' : '重置为默认'),
               ),
             ],
           ),

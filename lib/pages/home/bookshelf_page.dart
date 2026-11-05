@@ -1,3 +1,5 @@
+import 'package:wild/eink/eink_overlays.dart';
+import 'package:wild/eink/eink_progress_indicator.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:flutter/material.dart';
@@ -148,7 +150,7 @@ class _BookshelfPageState extends State<BookshelfPage> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              if (isCfLoading) const LinearProgressIndicator(minHeight: 3),
+              if (isCfLoading) const EInkProgressIndicator(child: LinearProgressIndicator(minHeight: 3),),
               if (usesAppleGlass)
                 AppleGlassFilterBar(
                   labels:
@@ -254,7 +256,7 @@ class _BookshelfPageState extends State<BookshelfPage> {
   }
 
   void _showDeleteConfirmDialog(BuildContext context) {
-    showAdaptiveDialog(
+    showEinkAwareDialog(
       context: context,
       builder:
           (ctx) => AlertDialog.adaptive(
@@ -319,7 +321,7 @@ class _BookshelfPageState extends State<BookshelfPage> {
 })();
 ''';
 
-    showAdaptiveDialog(
+    showEinkAwareDialog(
       context: context,
       barrierDismissible: false,
       builder:
@@ -345,7 +347,7 @@ class _BookshelfPageState extends State<BookshelfPage> {
   }
 
   void _showTipDialog(BuildContext context, String tip) {
-    showAdaptiveDialog(
+    showEinkAwareDialog(
       context: context,
       builder:
           (context) => AlertDialog.adaptive(
@@ -357,7 +359,7 @@ class _BookshelfPageState extends State<BookshelfPage> {
 
   void _showMoveDialog(BuildContext context) {
     final state = context.read<BookshelfCubit>().state;
-    showAdaptiveDialog(
+    showEinkAwareDialog(
       context: context,
       builder:
           (context) => AlertDialog.adaptive(

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:wild/eink/eink_navigation.dart';
+import 'package:wild/eink/eink_policy.dart';
 import 'package:wild/sources/book_source.dart';
 import 'package:wild/pages/auth_cubit.dart';
 import 'package:wild/theme/material_you.dart';
@@ -109,6 +111,7 @@ class _HomePageState extends State<HomePage> {
       value: _historyCubit,
       child: BlocBuilder<UpdateCubit, UpdateState>(
         builder: (context, state) {
+          final eink = einkEnabled(context);
           final destinations = [
             FluidNavigationDestination(
               icon:
@@ -141,7 +144,7 @@ class _HomePageState extends State<HomePage> {
             ),
           ];
           return Scaffold(
-            extendBody: usesMaterialYou || usesAppleGlass,
+            extendBody: !eink && (usesMaterialYou || usesAppleGlass),
             body: IndexedStack(
               index: _currentIndex,
               children: [
@@ -176,7 +179,21 @@ class _HomePageState extends State<HomePage> {
               ],
             ),
             bottomNavigationBar:
-                usesAppleGlass
+                eink
+                    ? EInkNavigationBar(
+                      destinations: [
+                        for (final destination in destinations)
+                          EInkNavigationDestination(
+                            icon: destination.icon,
+                            selectedIcon: destination.selectedIcon,
+                            label: destination.label,
+                            showBadge: destination.showBadge,
+                          ),
+                      ],
+                      selectedIndex: _currentIndex,
+                      onDestinationSelected: _onDestinationSelected,
+                    )
+                    : usesAppleGlass
                     ? AppleGlassBottomBar(
                       index: _currentIndex,
                       onSelect: _onDestinationSelected,

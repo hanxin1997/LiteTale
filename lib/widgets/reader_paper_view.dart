@@ -21,6 +21,7 @@ class ReaderPaperView extends StatelessWidget {
     required this.textStyle,
     required this.paragraphSpacing,
     this.titleFontFamily = appFontFamily,
+    this.highContrast = false,
   });
 
   final List<ReaderPage> pages;
@@ -32,6 +33,7 @@ class ReaderPaperView extends StatelessWidget {
   final double paragraphSpacing;
   // Catalog titles are normal Unicode, never chapter-obfuscated glyph codes.
   final String titleFontFamily;
+  final bool highContrast;
 
   Widget _leaf(int index, {required bool showTitle}) => ReaderPaperLeaf(
     key: ValueKey('reader-leaf-$index'),
@@ -47,6 +49,7 @@ class ReaderPaperView extends StatelessWidget {
     textStyle: textStyle,
     paragraphSpacing: paragraphSpacing,
     titleFontFamily: titleFontFamily,
+    highContrast: highContrast,
   );
 
   @override
@@ -69,22 +72,23 @@ class ReaderPaperView extends StatelessWidget {
             ),
           ],
         ),
-        Center(
-          child: IgnorePointer(
-            child: Container(
-              width: 16,
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  colors: [
-                    Colors.transparent,
-                    Colors.black.withValues(alpha: 0.035),
-                    Colors.transparent,
-                  ],
+        if (!highContrast)
+          Center(
+            child: IgnorePointer(
+              child: Container(
+                width: 16,
+                decoration: BoxDecoration(
+                  gradient: LinearGradient(
+                    colors: [
+                      Colors.transparent,
+                      Colors.black.withValues(alpha: 0.035),
+                      Colors.transparent,
+                    ],
+                  ),
                 ),
               ),
             ),
           ),
-        ),
       ],
     );
   }
@@ -100,6 +104,7 @@ class ReaderPaperLeaf extends StatelessWidget {
     required this.textStyle,
     required this.paragraphSpacing,
     this.titleFontFamily = appFontFamily,
+    this.highContrast = false,
   });
 
   final ReaderPage? page;
@@ -109,6 +114,7 @@ class ReaderPaperLeaf extends StatelessWidget {
   final TextStyle textStyle;
   final double paragraphSpacing;
   final String titleFontFamily;
+  final bool highContrast;
 
   @override
   Widget build(BuildContext context) {
@@ -143,7 +149,9 @@ class ReaderPaperLeaf extends StatelessWidget {
                   style: textStyle.copyWith(
                     fontFamily: titleFontFamily,
                     fontSize: 12,
-                    color: textStyle.color?.withValues(alpha: .6),
+                    color: highContrast
+                        ? Colors.black
+                        : textStyle.color?.withValues(alpha: .6),
                   ),
                 ),
               ),
@@ -168,9 +176,12 @@ class ReaderPaperLeaf extends StatelessWidget {
             ? content.substring(0, content.length - 1)
             : content)
         .split('\n');
-    final titleColor = textStyle.color?.withValues(
-      alpha: layout.isSpread ? 0.60 : 0.30,
-    );
+    final titleColor =
+        highContrast
+            ? Colors.black
+            : textStyle.color?.withValues(
+              alpha: layout.isSpread ? 0.60 : 0.30,
+            );
     return Padding(
       padding: layout.insets,
       child: Column(
@@ -216,6 +227,7 @@ class ReaderPaperLeaf extends StatelessWidget {
                             fragment: fragment,
                             style: textStyle,
                             textScaler: layout.textScaler,
+                            highContrast: highContrast,
                           ),
                       ],
                     )

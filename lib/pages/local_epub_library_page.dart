@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:file_selector/file_selector.dart';
@@ -137,7 +138,7 @@ class _LocalEpubLibraryPageState extends State<LocalEpubLibraryPage> {
 
   Future<void> _remove(LocalEpubBook book) async {
     if (_busy || _picking) return;
-    final confirmed = await showAdaptiveDialog<bool>(
+    final confirmed = await showEinkAwareDialog<bool>(
       context: context,
       builder:
           (ctx) => AlertDialog.adaptive(
@@ -176,7 +177,7 @@ class _LocalEpubLibraryPageState extends State<LocalEpubLibraryPage> {
   }
 
   void _bookDetails(LocalEpubBook book) {
-    showAdaptiveDialog<void>(
+    showEinkAwareDialog<void>(
       context: context,
       builder:
           (ctx) => AlertDialog.adaptive(

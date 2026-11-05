@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -67,7 +68,7 @@ class AppColorSettings extends StatelessWidget {
         Future<void> chooseCustom() async {
           var picked =
               appAccentSeed(selected) ?? Theme.of(context).colorScheme.primary;
-          final result = await showAdaptiveDialog<Color>(
+          final result = await showEinkAwareDialog<Color>(
             context: context,
             builder:
                 (dialogContext) => AlertDialog.adaptive(

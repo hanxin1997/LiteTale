@@ -19,6 +19,7 @@ class ReaderParagraphLayout {
     required TextStyle baseStyle,
     required double width,
     required TextScaler textScaler,
+    this.highContrast = false,
   }) : _fragment = fragment,
        _baseStyle = baseStyle {
     final style = baseStyle.copyWith(height: fragment.block.style.lineHeight);
@@ -52,8 +53,14 @@ class ReaderParagraphLayout {
             : 0.0;
     prefixLength = indent > 0 ? 1 : 0;
     final sliced = fragment.block.slice(fragment.start, fragment.end);
-    final background = _palette(box.background, box.darkBackground);
-    final defaultInk = _readable(style.color ?? Colors.black, background);
+    final background =
+        highContrast
+            ? Colors.white
+            : _palette(box.background, box.darkBackground);
+    final defaultInk =
+        highContrast
+            ? Colors.black
+            : _readable(style.color ?? Colors.black, background);
     final span = TextSpan(
       style: style,
       children: [
@@ -70,15 +77,18 @@ class ReaderParagraphLayout {
               fontWeight: run.style.bold ? FontWeight.bold : style.fontWeight,
               fontStyle: run.style.italic ? FontStyle.italic : FontStyle.normal,
               letterSpacing: run.style.letterSpacing.resolve(fontSize),
-              color: _readable(
-                _palette(run.style.color, run.style.darkColor) ?? defaultInk,
-                _palette(run.style.background, run.style.darkBackground) ??
-                    background,
-              ),
-              backgroundColor: _palette(
-                run.style.background,
-                run.style.darkBackground,
-              ),
+              color:
+                  highContrast
+                      ? Colors.black
+                      : _readable(
+                        _palette(run.style.color, run.style.darkColor) ?? defaultInk,
+                        _palette(run.style.background, run.style.darkBackground) ??
+                            background,
+                      ),
+              backgroundColor:
+                  highContrast
+                      ? Colors.white
+                      : _palette(run.style.background, run.style.darkBackground),
               decoration: TextDecoration.combine([
                 if (run.style.underline) TextDecoration.underline,
                 if (run.style.strike) TextDecoration.lineThrough,
@@ -122,6 +132,7 @@ class ReaderParagraphLayout {
             baseStyle: style.copyWith(color: defaultInk),
             width: cellWidth,
             textScaler: textScaler,
+            highContrast: highContrast,
           ),
         );
       }
@@ -131,6 +142,8 @@ class ReaderParagraphLayout {
 
   final ReaderFragment _fragment;
   final TextStyle _baseStyle;
+  // Painting colors only; pagination continues to use identical font metrics.
+  final bool highContrast;
   final _cells = <ReaderParagraphLayout>[];
   double _cellWidth = 0;
   late final double _boxWidth, _textLeft, _bottom;
@@ -175,7 +188,10 @@ class ReaderParagraphLayout {
       bottomLeft: _fragment.last ? radius : Radius.zero,
       bottomRight: _fragment.last ? radius : Radius.zero,
     );
-    final bg = _palette(box.background, box.darkBackground);
+    final bg =
+        highContrast
+            ? Colors.white
+            : _palette(box.background, box.darkBackground);
     if (bg != null) canvas.drawRRect(rrect, Paint()..color = bg);
     final font = _baseStyle.fontSize ?? 16;
     final borders = [box.top, box.right, box.bottom, box.left];
@@ -186,7 +202,9 @@ class ReaderParagraphLayout {
     if (!_fragment.last) widths[2] = 0;
     final colors = [
       for (final b in borders)
-        _palette(b.color, b.darkColor) ?? _baseStyle.color ?? Colors.black,
+        highContrast
+            ? Colors.black
+            : _palette(b.color, b.darkColor) ?? _baseStyle.color ?? Colors.black,
     ];
     if (widths[0] > 0 &&
         widths.every((w) => w == widths[0]) &&

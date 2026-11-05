@@ -1,3 +1,5 @@
+import 'package:wild/eink/eink_overlays.dart';
+import 'package:wild/eink/eink_progress_indicator.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:flutter/material.dart';
@@ -93,7 +95,9 @@ class NovelInfoPage extends StatelessWidget {
                       child: SizedBox(
                         width: 24,
                         height: 24,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+                        child: EInkProgressIndicator(
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
                       ),
                     );
                   }
@@ -129,7 +133,7 @@ class NovelInfoPage extends StatelessWidget {
                             actionPath =
                                 '/modules/article/addbookcase.php?bid=$novelId';
                           }
-                          showAdaptiveDialog(
+                          showEinkAwareDialog(
                             context: context,
                             barrierDismissible: false,
                             builder:

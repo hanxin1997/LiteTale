@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:wild/eink/eink_policy.dart';
 import 'package:wild/sources/source_api.dart';
 import 'package:wild/sources/book_source.dart';
 import 'package:wild/sources/lnovel_source.dart';
@@ -12,18 +13,52 @@ class CachedImageProvider extends ImageProvider<CachedImageProvider> {
   final String url;
   final double scale;
   final SourceId source;
+  final bool staticFrame;
 
-  CachedImageProvider(this.url, {required this.source, this.scale = 1.0});
+  CachedImageProvider(
+    this.url, {
+    required this.source,
+    this.scale = 1.0,
+    this.staticFrame = false,
+  });
+
+  CachedImageProvider firstFrameOnly() =>
+      staticFrame
+          ? this
+          : CachedImageProvider(
+            url,
+            source: source,
+            scale: scale,
+            staticFrame: true,
+          );
 
   @override
   ImageStreamCompleter loadImage(
     CachedImageProvider key,
     ImageDecoderCallback decode,
   ) {
+    if (key.staticFrame) {
+      // Decode through the same source-owned request path, but never schedule
+      // subsequent GIF/WebP frames. The separate key prevents cache crossover.
+      return OneFrameImageStreamCompleter(_loadFirstFrame(key, decode));
+    }
     return MultiFrameImageStreamCompleter(
       codec: _loadAsync(key, decode),
       scale: key.scale,
     );
+  }
+
+  Future<ImageInfo> _loadFirstFrame(
+    CachedImageProvider key,
+    ImageDecoderCallback decode,
+  ) async {
+    final codec = await _loadAsync(key, decode);
+    try {
+      final frame = await codec.getNextFrame();
+      return ImageInfo(image: frame.image, scale: key.scale);
+    } finally {
+      codec.dispose();
+    }
   }
 
   @override
@@ -80,11 +115,15 @@ class CachedImageProvider extends ImageProvider<CachedImageProvider> {
     final CachedImageProvider typedOther = other as CachedImageProvider;
     return url == typedOther.url &&
         scale == typedOther.scale &&
-        source == typedOther.source;
+        source == typedOther.source &&
+        staticFrame == typedOther.staticFrame;
   }
 
   @override
-  int get hashCode => Object.hash(url, scale, source);
+  int get hashCode =>
+      staticFrame
+          ? Object.hash(url, scale, source, true)
+          : Object.hash(url, scale, source);
 
   @override
   String toString() =>
@@ -117,7 +156,11 @@ class CachedImage extends StatelessWidget {
       image: ResizeImage.resizeIfNeeded(
         cacheWidth,
         null,
-        CachedImageProvider(url, source: source),
+        CachedImageProvider(
+          url,
+          source: source,
+          staticFrame: einkEnabled(context),
+        ),
       ),
       fit: fit,
       width: width,

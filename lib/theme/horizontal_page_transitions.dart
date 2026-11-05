@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:wild/eink/eink_policy.dart';
 
 /// A page covers its predecessor from the right and uncovers it to the right.
 /// The page underneath stays still. No opacity, scale, or shared-element work is
@@ -33,9 +34,30 @@ class HorizontalCoverPageTransitionsBuilder extends PageTransitionsBuilder {
     Animation<double> secondaryAnimation,
     Widget child,
   ) {
-    if (route.isFirst) return child;
+    if (route.isFirst || einkEnabled(context)) return child;
     return _HorizontalCoverTransition(animation: animation, child: child);
   }
+}
+
+/// Used by the independent E Ink theme so standard MaterialPageRoute lifecycle
+/// durations are also zero. Ordinary themes retain their existing 300 ms path.
+class EInkPageTransitionsBuilder extends PageTransitionsBuilder {
+  const EInkPageTransitionsBuilder();
+
+  @override
+  Duration get transitionDuration => Duration.zero;
+
+  @override
+  Duration get reverseTransitionDuration => Duration.zero;
+
+  @override
+  Widget buildTransitions<T>(
+    PageRoute<T> route,
+    BuildContext context,
+    Animation<double> animation,
+    Animation<double> secondaryAnimation,
+    Widget child,
+  ) => child;
 }
 
 /// Forces the app's full-screen motion even if a host theme replaces the
@@ -48,10 +70,17 @@ class HorizontalCoverPageRoute<T> extends MaterialPageRoute<T> {
   });
 
   @override
-  Duration get transitionDuration => const Duration(milliseconds: 300);
+  Duration get transitionDuration =>
+      _einkEnabled ? Duration.zero : const Duration(milliseconds: 300);
 
   @override
-  Duration get reverseTransitionDuration => const Duration(milliseconds: 300);
+  Duration get reverseTransitionDuration =>
+      _einkEnabled ? Duration.zero : const Duration(milliseconds: 300);
+
+  bool get _einkEnabled {
+    final routeContext = navigator?.context;
+    return routeContext != null && einkEnabled(routeContext, listen: false);
+  }
 
   @override
   Widget buildTransitions(
@@ -59,10 +88,15 @@ class HorizontalCoverPageRoute<T> extends MaterialPageRoute<T> {
     Animation<double> animation,
     Animation<double> secondaryAnimation,
     Widget child,
-  ) => (Theme.of(context).platform == TargetPlatform.iOS
-          ? const CupertinoPageTransitionsBuilder()
-          : const HorizontalCoverPageTransitionsBuilder())
-      .buildTransitions(this, context, animation, secondaryAnimation, child);
+  ) {
+    // A preference change during a running transition presents its final frame
+    // immediately. Its controller remains alive so push/pop futures can finish.
+    if (einkEnabled(context)) return child;
+    return (Theme.of(context).platform == TargetPlatform.iOS
+            ? const CupertinoPageTransitionsBuilder()
+            : const HorizontalCoverPageTransitionsBuilder())
+        .buildTransitions(this, context, animation, secondaryAnimation, child);
+  }
 }
 
 class _HorizontalCoverTransition extends StatefulWidget {

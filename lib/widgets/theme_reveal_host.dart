@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
+import 'package:wild/eink/eink_policy.dart';
 
 /// Keeps the old screen still while the new theme expands from the tapped icon.
 /// Only one bitmap and a circular clip are painted during the transition.
@@ -41,6 +42,16 @@ class ThemeRevealHostState extends State<ThemeRevealHost>
       parent: _controller,
       curve: Curves.easeInOutSine,
     );
+  }
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    // A preference can change while the old-theme bitmap is expanding.
+    // Complete the existing cleanup path instead of freezing its overlay.
+    if (einkEnabled(context) && _controller.isAnimating) {
+      _controller.stop(canceled: true);
+    }
   }
 
   @override
@@ -118,6 +129,11 @@ class ThemeRevealHostState extends State<ThemeRevealHost>
         frame.dispose();
         return;
       }
+      if (einkEnabled(context, listen: false)) {
+        frame.dispose();
+        changeTheme();
+        return;
+      }
 
       // The previous reveal ends at 1.0. Reset before either theme rebuilds or
       // the overlay paints, otherwise the next tap exposes the entire new
@@ -131,6 +147,7 @@ class ThemeRevealHostState extends State<ThemeRevealHost>
       if (!mounted) return;
       await WidgetsBinding.instance.endOfFrame;
       if (!mounted) return;
+      if (einkEnabled(context, listen: false)) return;
       await _controller.forward(from: 0).orCancel;
     } on TickerCanceled {
       // The route was disposed while the reveal was running.

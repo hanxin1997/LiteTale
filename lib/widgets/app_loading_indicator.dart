@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
+import 'package:wild/eink/eink_policy.dart';
 import 'package:wild/widgets/expressive_loading_indicator.dart';
 
 /// A regular circular spinner using the surrounding surface's theme color.
@@ -11,6 +12,21 @@ class AppLoadingIndicator extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (einkEnabled(context)) {
+      return Semantics(
+        label: '正在加载',
+        child: ExcludeSemantics(
+          child: SizedBox.square(
+            dimension: size ?? 48,
+            child: Icon(
+              Icons.hourglass_empty_rounded,
+              size: size ?? 48,
+              color: Colors.black,
+            ),
+          ),
+        ),
+      );
+    }
     if (defaultTargetPlatform != TargetPlatform.iOS) {
       return ExpressiveLoadingIndicator(size: size ?? 48, color: color);
     }

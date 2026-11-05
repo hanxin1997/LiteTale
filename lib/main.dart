@@ -57,6 +57,10 @@ import 'package:wild/settings/reading_statistics.dart';
 import 'package:wild/settings/settings_theme.dart';
 import 'package:wild/theme/ios_glass_theme.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
+import 'package:wild/eink/eink_preferences.dart';
+import 'package:wild/eink/eink_policy.dart';
+import 'package:wild/eink/eink_scope.dart';
+import 'package:wild/eink/eink_theme.dart';
 
 final lightTheme = ThemeData(
   colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
@@ -95,6 +99,7 @@ class MyApp extends StatelessWidget {
       providers: [
         BlocProvider(create: (_) => FontSettingsCubit()),
         BlocProvider(create: (_) => SettingsPreferencesCubit()),
+        BlocProvider(create: (_) => EInkPreferencesCubit()),
         BlocProvider(create: (_) => ReadingStatisticsCubit()),
         BlocProvider(create: (_) => AppAccentCubit()),
         BlocProvider(create: (_) => ReaderCurlCubit()),
@@ -154,6 +159,11 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
       (FontSettingsCubit cubit) => cubit.state.appFamily,
     );
     final settings = context.watch<SettingsPreferencesCubit>().state;
+    final eink = einkEnabled(context);
+    // Apply the device display policy after the user's font and locale. The
+    // saved theme stays intact, so disabling the mode restores it immediately.
+    ThemeData displayTheme(ThemeData normal) =>
+        eink ? einkTheme(normal) : normal;
     return BlocBuilder<ThemeCubit, ReaderTheme>(
       builder: (context, theme) {
         return BlocBuilder<AppAccentCubit, String>(
@@ -167,42 +177,50 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
                       themeAnimationDuration: Duration.zero,
                       themeAnimationCurve: Curves.easeInOutCubic,
                       builder:
-                          (context, child) => Wenku8BrowserHost(
-                            child: BiliBrowserHost(
-                              child:
-                                  Platform.isIOS
-                                      ? HuanmengBrowserHost(
-                                        child: ThemeRevealHost(child: child!),
-                                      )
-                                      : ThemeRevealHost(child: child!),
+                          (context, child) => EInkScope(
+                            child: Wenku8BrowserHost(
+                              child: BiliBrowserHost(
+                                child:
+                                    Platform.isIOS
+                                        ? HuanmengBrowserHost(
+                                          child: ThemeRevealHost(child: child!),
+                                        )
+                                        : ThemeRevealHost(child: child!),
+                              ),
                             ),
                           ),
-                      themeMode: switch (theme.themeMode) {
-                        ReaderThemeMode.auto => ThemeMode.system,
-                        ReaderThemeMode.light => ThemeMode.light,
-                        ReaderThemeMode.dark => ThemeMode.dark,
-                      },
-                      theme: applySettingsTheme(
-                        applyImportedAppFont(
-                          usesMaterialYou
-                              ? materialYouTheme(
-                                Brightness.light,
-                                dynamicScheme: dynamicLight,
-                                seedColor: appAccentSeed(accent),
-                              )
-                              : usesAppleGlass
-                              ? iosGlassTheme(
-                                Brightness.light,
-                                accent: IosSystemColors.accent(
-                                  accent,
+                      themeMode: eink
+                          ? ThemeMode.light
+                          : switch (theme.themeMode) {
+                            ReaderThemeMode.auto => ThemeMode.system,
+                            ReaderThemeMode.light => ThemeMode.light,
+                            ReaderThemeMode.dark => ThemeMode.dark,
+                          },
+                      theme: displayTheme(
+                        applySettingsTheme(
+                          applyImportedAppFont(
+                            usesMaterialYou
+                                ? materialYouTheme(
                                   Brightness.light,
-                                ),
-                              )
-                              : lightTheme,
-                          appFont,
+                                  dynamicScheme: dynamicLight,
+                                  seedColor: appAccentSeed(accent),
+                                )
+                                : usesAppleGlass
+                                ? iosGlassTheme(
+                                  Brightness.light,
+                                  accent: IosSystemColors.accent(
+                                    accent,
+                                    Brightness.light,
+                                  ),
+                                )
+                                : lightTheme,
+                            appFont,
+                          ),
+                          settings,
                         ),
-                        settings,
                       ),
+                      // The effective mode is light while E Ink is enabled;
+                      // keep the user's dark theme ready for normal mode.
                       darkTheme: applySettingsTheme(
                         applyImportedAppFont(
                           usesMaterialYou
@@ -229,6 +247,12 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
                       localizationsDelegates:
                           GlobalMaterialLocalizations.delegates,
                       onGenerateRoute: (settings) {
+                        // Capture only the new display override. An E Ink
+                        // reader stays paginated until it closes; ordinary
+                        // routes keep their existing reader preference lookup.
+                        final openedWithEink =
+                            settings.name == '/novel/reader' &&
+                            einkEnabled(context, listen: false);
                         final routes = <String, WidgetBuilder>{
                           '/init': (context) => const InitPage(),
                           '/login':
@@ -277,8 +301,9 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
                                     book_sources.SourceId.localEpub) {
                               return AppleBooksOpenPage(bookId: aid);
                             }
-                            final readerType =
-                                context.read<ReaderTypeCubit>().state;
+                            final readerType = openedWithEink
+                                ? ReaderType.normal
+                                : context.read<ReaderTypeCubit>().state;
 
                             if (readerType == ReaderType.html) {
                               return HtmlReaderPage(

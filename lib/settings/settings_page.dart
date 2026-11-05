@@ -8,6 +8,9 @@ import 'package:wild/settings/settings_widgets.dart';
 import 'package:wild/settings/theme_paper_page.dart';
 import 'package:wild/widgets/left_aligned_scrollable.dart';
 import 'package:wild/theme/material_you.dart';
+import 'package:wild/eink/eink_setting.dart';
+import 'package:wild/eink/eink_policy.dart';
+import 'package:wild/eink/eink_preferences.dart';
 
 /// The former settings entry now opens display preferences directly.
 class SettingsPage extends StatelessWidget {
@@ -31,6 +34,8 @@ class SettingsPage extends StatelessWidget {
                   : null,
           child: SettingsTileGroup(
             children: [
+              if (supportsEink && context.watch<EInkPreferencesCubit?>() != null)
+                const EInkSetting(),
               SettingsEntry(
                 icon: Icons.format_paint_outlined,
                 title: '主题与纸张',

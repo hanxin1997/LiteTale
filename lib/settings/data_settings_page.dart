@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'dart:convert';
 import 'dart:io';
@@ -117,7 +118,7 @@ class _DataSettingsPageState extends State<DataSettingsPage> {
     }
     final doc = await service.parse(await file.readAsString());
     if (!mounted) return null;
-    final overwrite = await showAdaptiveDialog<bool>(
+    final overwrite = await showEinkAwareDialog<bool>(
       context: context,
       builder:
           (ctx) => AlertDialog.adaptive(

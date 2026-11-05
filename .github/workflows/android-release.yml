@@ -1,0 +1,203 @@
+name: Android Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# Building needs no repository write access. Only the final publication job can
+# create a tag/release, after all checks and APK validation have succeeded.
+permissions:
+  contents: read
+
+concurrency:
+  group: android-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Test and build Android
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      FLUTTER_VERSION: '3.29.3'
+      CARGOKIT_RUST_TOOLCHAIN: '1.90.0'
+      CARGO_BUILD_JOBS: '2'
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build_number: ${{ steps.version.outputs.build_number }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Derive a unique release version
+        id: version
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import os, re
+          from pathlib import Path
+          match = re.search(r'^version:\s*(\S+)', Path('pubspec.yaml').read_text(), re.M)
+          if not match:
+              raise SystemExit('pubspec.yaml has no version')
+          version = match[1].split('+')[0]
+          if not re.fullmatch(r'\d+\.\d+\.\d+', version):
+              raise SystemExit('Formal Android releases require a stable x.y.z version')
+          build = 100000 + int(os.environ['GITHUB_RUN_NUMBER'])
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'version={version}\nbuild_number={build}\ntag=v{version}+android.{build}\n')
+          PY
+
+      - name: Check persistent signing configuration
+        env:
+          SIGNING_KEY: ${{ secrets.LITETALE_ANDROID_KEYSTORE_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.LITETALE_ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          test -n "$SIGNING_KEY" || { echo 'Missing LITETALE_ANDROID_KEYSTORE_BASE64'; exit 1; }
+          test -n "$SIGNING_PASSWORD" || { echo 'Missing LITETALE_ANDROID_KEYSTORE_PASSWORD'; exit 1; }
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: 'platform-tools platforms;android-33 platforms;android-35 build-tools;35.0.0 ndk;27.0.12077973 cmake;3.22.1'
+
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+
+      - name: Set up the pinned Rust toolchain
+        run: |
+          rustup toolchain install "$CARGOKIT_RUST_TOOLCHAIN" --profile minimal
+          rustup default "$CARGOKIT_RUST_TOOLCHAIN"
+          rustup target add aarch64-linux-android x86_64-linux-android --toolchain "$CARGOKIT_RUST_TOOLCHAIN"
+
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: android-ubuntu24-flutter3.29.3-rust1.90-ndk27-${{ hashFiles('rust/Cargo.lock', 'pubspec.lock', 'android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+
+      - name: Resolve locked dependencies
+        run: |
+          flutter config --no-analytics
+          flutter pub get --enforce-lockfile
+          mkdir -p build/ci-logs
+
+      - name: Analyze Dart code
+        shell: bash
+        run: |
+          set -o pipefail
+          dart analyze --no-fatal-warnings lib test integration_test 2>&1 | tee build/ci-logs/analyze.log
+
+      - name: Test the APK validation tool
+        run: python3 -B -m unittest discover -s test/scripts -p test_verify_android_apks.py -v
+
+      - name: Run Flutter regression tests
+        shell: bash
+        run: |
+          set -o pipefail
+          flutter test --no-pub 2>&1 | tee build/ci-logs/tests.log
+
+      - name: Build ARM64 and x86_64 release APKs
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
+        run: |
+          set -o pipefail
+          # Limit memory on the hosted runner without changing local defaults.
+          printf '\norg.gradle.jvmargs=-Xmx4G -XX:MaxMetaspaceSize=1G\norg.gradle.workers.max=2\n' >> android/gradle.properties
+          flutter build apk --release --no-pub --target-platform android-arm64,android-x64 --split-per-abi --build-name "$RELEASE_VERSION" --build-number "$BUILD_NUMBER" 2>&1 | tee build/ci-logs/build.log
+
+      - name: Sign with the fork's persistent private key
+        shell: bash
+        env:
+          SIGNING_KEY: ${{ secrets.LITETALE_ANDROID_KEYSTORE_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.LITETALE_ANDROID_KEYSTORE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          key_file="$RUNNER_TEMP/litetale-android-signing.p12"
+          trap 'rm -f "$key_file"' EXIT
+          umask 077
+          printf '%s' "$SIGNING_KEY" | base64 --decode > "$key_file"
+          for abi in arm64-v8a x86_64; do
+            "$ANDROID_HOME/build-tools/35.0.0/apksigner" sign --ks "$key_file" --ks-type PKCS12 --ks-pass env:SIGNING_PASSWORD --key-pass env:SIGNING_PASSWORD "build/app/outputs/flutter-apk/app-$abi-release.apk"
+          done
+
+      - name: Validate and collect APKs
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build_number }}
+        run: |
+          set -euo pipefail
+          mkdir -p build/android-release
+          python3 tools/verify_android_apks.py --version "$RELEASE_VERSION" --build-number "$BUILD_NUMBER" --report build/android-release/apk-verification.json
+          for abi in arm64-v8a x86_64; do
+            cp "build/app/outputs/flutter-apk/app-$abi-release.apk" "build/android-release/LiteTale-v$RELEASE_VERSION-build.$BUILD_NUMBER-$abi.apk"
+          done
+          cd build/android-release
+          sha256sum ./*.apk > SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Android-release-${{ github.run_number }}
+          path: build/android-release/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Android-logs-${{ github.run_number }}-${{ github.run_attempt }}
+          path: build/ci-logs/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  publish:
+    name: Publish formal GitHub Release
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: Android-release-${{ github.run_number }}
+          path: release
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.build.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: LiteTale ${{ needs.build.outputs.version }} · Android ${{ needs.build.outputs.build_number }}
+          draft: false
+          prerelease: false
+          make_latest: true
+          fail_on_unmatched_files: true
+          body: |
+            从 main 提交 `${{ github.sha }}` 自动构建，静态分析、Flutter 回归测试和 APK 校验通过后发布。
+
+            - Android ARM64 设备下载 `arm64-v8a.apk`；x86_64 设备/模拟器下载 `x86_64.apk`。
+            - 本 fork 使用独立固定签名，以后此仓库生成的 APK 可覆盖升级。
+            - 与上游或其他签名的已安装版本可能无法直接覆盖；请先备份阅读数据，勿直接卸载后丢失数据。
+            - 应用内检查更新仍指向上游；本 fork 版本从此 Releases 页面下载。
+            - 构建通过不代表小米电纸书 Note 的物理刷新和残影已完成真机验收。
+          files: |
+            release/*.apk
+            release/SHA256SUMS
+            release/apk-verification.json

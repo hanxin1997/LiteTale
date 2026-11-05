@@ -1,6 +1,7 @@
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:flutter/material.dart';
+import 'package:wild/eink/eink_policy.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:wild/cubits/reader_curl_cubit.dart';
 
@@ -9,7 +10,13 @@ class ReaderCurlSetting extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      usesAppleGlass
+      einkEnabled(context)
+          ? const ListTile(
+            leading: Icon(Icons.menu_book_outlined),
+            title: Text('静态整页翻页'),
+            subtitle: Text('墨水屏模式暂停仿书翻页；关闭后恢复原选择'),
+          )
+          : usesAppleGlass
           ? const SizedBox.shrink()
           : BlocBuilder<ReaderCurlCubit, bool>(
             builder:

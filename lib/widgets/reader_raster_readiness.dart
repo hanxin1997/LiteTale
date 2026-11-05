@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:wild/eink/eink_policy.dart';
+import 'package:wild/widgets/cached_image.dart';
 import 'package:wild/widgets/app_loading_indicator.dart';
 
 /// Resources belonging to one reader page must paint before its PNG is cached.
@@ -67,6 +69,14 @@ class _ReaderRasterImageState extends State<ReaderRasterImage> {
   Object _resource = Object();
   ReaderRasterReadiness? _readiness;
   bool _finished = false;
+  bool _staticFrame = false;
+
+  void _restart() {
+    _readiness?.complete(_resource);
+    _resource = Object();
+    _finished = false;
+    _readiness?.waitFor(_resource);
+  }
 
   void _finish() {
     _finished = true;
@@ -76,6 +86,11 @@ class _ReaderRasterImageState extends State<ReaderRasterImage> {
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    final staticFrame = einkEnabled(context);
+    if (_staticFrame != staticFrame && widget.image is CachedImageProvider) {
+      _restart();
+    }
+    _staticFrame = staticFrame;
     final readiness = ReaderRasterScope.maybeOf(context);
     if (readiness != _readiness) {
       _readiness?.complete(_resource);
@@ -88,10 +103,7 @@ class _ReaderRasterImageState extends State<ReaderRasterImage> {
   void didUpdateWidget(ReaderRasterImage oldWidget) {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.image != widget.image) {
-      _readiness?.complete(_resource);
-      _resource = Object();
-      _finished = false;
-      _readiness?.waitFor(_resource);
+      _restart();
     }
   }
 
@@ -103,7 +115,10 @@ class _ReaderRasterImageState extends State<ReaderRasterImage> {
 
   @override
   Widget build(BuildContext context) => Image(
-    image: widget.image,
+    image:
+        _staticFrame && widget.image is CachedImageProvider
+            ? (widget.image as CachedImageProvider).firstFrameOnly()
+            : widget.image,
     fit: BoxFit.contain,
     frameBuilder: (context, child, frame, synchronous) {
       if (frame == null) return const CenteredLoadingIndicator();

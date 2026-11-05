@@ -14,11 +14,13 @@ import 'package:wild/settings/settings_widgets.dart';
 import 'package:wild/settings/theme_paper_page.dart' show SettingsValueSlider;
 import 'package:wild/widgets/left_aligned_scrollable.dart';
 import 'package:wild/widgets/reader_volume_turn_setting.dart';
+import 'package:wild/eink/eink_policy.dart';
 
 class ReaderSettingsPage extends StatelessWidget {
   const ReaderSettingsPage({super.key});
   @override
   Widget build(BuildContext context) {
+    final eink = einkEnabled(context);
     final type = context.watch<ReaderTypeCubit>();
     final curl = context.watch<ReaderCurlCubit>();
     final size = context.watch<FontSizeCubit>();
@@ -63,9 +65,11 @@ class ReaderSettingsPage extends StatelessWidget {
               icon: Icons.chrome_reader_mode_outlined,
               title: '阅读模式',
               filled: false,
-              description: '重新打开阅读器后生效',
-              option: type.state == ReaderType.normal ? '分页阅读' : '连续滚动',
-              onTap: () async {
+              description: eink
+                  ? '重新打开阅读器使用分页，关闭墨水屏后恢复原阅读模式'
+                  : '重新打开阅读器后生效',
+              option: eink || type.state == ReaderType.normal ? '分页阅读' : '连续滚动',
+              onTap: eink ? null : () async {
                 final v = await chooseSetting(context, '阅读模式', const {
                   ReaderType.normal: '分页阅读',
                   ReaderType.html: '连续滚动',
@@ -79,10 +83,12 @@ class ReaderSettingsPage extends StatelessWidget {
               SettingsSwitch(
                 icon: Icons.auto_stories_outlined,
                 title: '仿真翻页',
-                description: '用于在线书源的纸张曲面与手势跟随；本地 EPUB 使用普通翻页',
-                value: curl.state,
+                description: eink
+                    ? '墨水屏直接换页，关闭后恢复原翻页效果'
+                    : '用于在线书源的纸张曲面与手势跟随；本地 EPUB 使用普通翻页',
+                value: !eink && curl.state,
                 onChanged:
-                    type.state == ReaderType.html
+                    eink || type.state == ReaderType.html
                         ? null
                         : (v) =>
                             settingsAction(context, () => curl.setEnabled(v)),

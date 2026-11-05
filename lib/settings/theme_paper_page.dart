@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/theme/ios_system_colors.dart';
@@ -18,6 +19,7 @@ import 'package:wild/settings/settings_preferences.dart';
 import 'package:wild/settings/settings_widgets.dart';
 import 'package:wild/settings/settings_platform.dart';
 import 'package:wild/widgets/left_aligned_scrollable.dart';
+import 'package:wild/eink/eink_policy.dart';
 
 class ThemePaperPage extends StatefulWidget {
   const ThemePaperPage({super.key});
@@ -60,6 +62,13 @@ class _ThemePaperPageState extends State<ThemePaperPage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            if (einkEnabled(context))
+              const Padding(
+                padding: EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Text(
+                  '墨水屏模式正在使用白底深色文字。以下主题与纸张设置会保留，关闭墨水屏模式后生效。',
+                ),
+              ),
             const SettingsSectionLabel('应用'),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -331,7 +340,7 @@ Future<Color?> pickSettingsColor(
   Color initial,
 ) {
   var value = initial;
-  return showAdaptiveDialog<Color>(
+  return showEinkAwareDialog<Color>(
     context: context,
     builder:
         (context) => AlertDialog.adaptive(

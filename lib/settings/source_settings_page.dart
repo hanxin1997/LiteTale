@@ -1,3 +1,4 @@
+import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -90,7 +91,7 @@ class _SourceSettingsPageState extends State<SourceSettingsPage> {
                 title: '清除接口缓存',
                 description: '保留账号、书架和阅读记录',
                 onTap: () async {
-                  final yes = await showAdaptiveDialog<bool>(
+                  final yes = await showEinkAwareDialog<bool>(
                     context: context,
                     builder:
                         (ctx) => AlertDialog.adaptive(

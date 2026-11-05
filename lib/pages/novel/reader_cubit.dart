@@ -29,9 +29,43 @@ import 'package:wild/pages/novel/left_padding_cubit.dart';
 import 'package:wild/pages/novel/right_padding_cubit.dart';
 import 'package:wild/cubits/font_settings_cubit.dart';
 
+/// One recipe for the native CSS renderer and its cache identity. Disabled
+/// callers keep exactly the previous color fields, with no additional key.
+Map<String, Object> readerEpubPaintOptions({
+  required ReaderTheme theme,
+  required Brightness brightness,
+  bool eink = false,
+}) {
+  final dark =
+      theme.themeMode == ReaderThemeMode.dark ||
+      theme.themeMode == ReaderThemeMode.auto && brightness == Brightness.dark;
+  String color(Color value) =>
+      '#${(value.toARGB32() & 0xffffff).toRadixString(16).padLeft(6, '0')}';
+  return {
+    'paper': color(
+      eink
+          ? Colors.white
+          : dark
+          ? theme.darkBackgroundColor
+          : theme.lightBackgroundColor,
+    ),
+    'ink': color(
+      eink
+          ? Colors.black
+          : dark
+          ? theme.darkTextColor
+          : theme.lightTextColor,
+    ),
+    if (eink) 'eink': true,
+  };
+}
+
 class ReaderCubit extends Cubit<ReaderState> {
   EpubCssReader? _cssReader;
   final ReaderTheme Function()? readerTheme;
+
+  /// Optional display policy; absent callers keep the original EPUB recipe.
+  final bool Function()? einkMode;
   final Future<void>? layoutReady;
   EpubBookFlow? _bookFlow;
   EpubFlowWindow? _bookWindow;
@@ -86,6 +120,7 @@ class ReaderCubit extends Cubit<ReaderState> {
     required this.rightPaddingCubit,
     required this.fontSettingsCubit,
     this.readerTheme,
+    this.einkMode,
     this.layoutReady,
     Future<SourceChapter> Function({required String aid, required String cid})?
     read,
@@ -692,12 +727,12 @@ class ReaderCubit extends Cubit<ReaderState> {
           );
           final layout = _localCssLayout(metrics);
           final theme = readerTheme?.call() ?? ReaderTheme.defaultTheme();
-          final dark =
-              theme.themeMode == ReaderThemeMode.dark ||
-              theme.themeMode == ReaderThemeMode.auto &&
-                  metrics.platformBrightness == Brightness.dark;
-          String color(Color c) =>
-              '#${(c.toARGB32() & 0xffffff).toRadixString(16).padLeft(6, '0')}';
+          final eink = einkMode?.call() ?? false;
+          final paintOptions = readerEpubPaintOptions(
+            theme: theme,
+            brightness: metrics.platformBrightness,
+            eink: eink,
+          );
           final font = await (cssFont ??= fontSettingsCubit.readerBytes());
           if (!current()) throw StateError('阅读器已更新');
           final pages = await cssReader.paginate(
@@ -717,12 +752,12 @@ class ReaderCubit extends Cubit<ReaderState> {
               'fontSize': layout.textScaler.scale(fontSizeCubit.state),
               'lineHeight': lineHeightCubit.state,
               'paragraphGap': paragraphSpacingCubit.state,
-              'paper': color(
-                dark ? theme.darkBackgroundColor : theme.lightBackgroundColor,
-              ),
-              'ink': color(dark ? theme.darkTextColor : theme.lightTextColor),
+              'paper': paintOptions['paper']!,
+              'ink': paintOptions['ink']!,
               'userFont': font != null,
               'fontKey': fontSettingsCubit.state.readerFamily,
+              // Omitting the key when disabled preserves existing cache IDs.
+              if (eink) 'eink': paintOptions['eink']!,
             },
           );
           firstPagination ??= (

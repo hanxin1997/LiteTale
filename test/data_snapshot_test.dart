@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:wild/settings/data_snapshot.dart';
+import 'package:wild/eink/eink_preferences.dart';
 
 late Uint8List _fontBytes;
 late Uint8List _paperBytes;
@@ -16,6 +17,25 @@ void main() {
         await File('lib/assets/fonts/LXGWNeoZhiSongPlus.ttf').readAsBytes();
     _fontDigest = sha256.convert(_fontBytes).toString();
     _paperBytes = await File('lib/assets/startup.png').readAsBytes();
+  });
+
+  test('portable snapshots reject device-only E Ink preferences', () async {
+    var inspected = false;
+    final service = DataSnapshotService(
+      root: Directory.systemTemp.path,
+      inspect: (_) async {
+        inspected = true;
+        return '{}';
+      },
+    );
+    // Importing another device's display capability must not enable this mode.
+    final snapshot = _baseSnapshot();
+    snapshot['settings']['properties'][EInkPreferencesCubit.propertyKey] = 'true';
+    await expectLater(
+      service.parse(jsonEncode(snapshot)),
+      throwsA(isA<FormatException>()),
+    );
+    expect(inspected, isFalse);
   });
 
   test('build obeys selected domains and reads only requested data', () async {

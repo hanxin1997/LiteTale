@@ -1,6 +1,7 @@
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:wild/eink/eink_policy.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:wild/theme/ios_system_colors.dart';
 import 'package:wild/theme/material_you.dart';
@@ -981,6 +982,23 @@ Future<T?> showAppBottomSheet<T>({
   bool? showDragHandle,
   BoxConstraints? constraints,
 }) {
+  if (einkEnabled(context, listen: false)) {
+    // Keep dismissal/navigation semantics, but neither animate the sheet nor
+    // let a drag deform its surface. Scrolling inside the sheet stays intact.
+    return showModalBottomSheet<T>(
+      context: context,
+      builder: builder,
+      isScrollControlled: isScrollControlled,
+      backgroundColor: backgroundColor ?? Colors.white,
+      useSafeArea: useSafeArea,
+      useRootNavigator: useRootNavigator,
+      isDismissible: isDismissible,
+      enableDrag: false,
+      showDragHandle: false,
+      constraints: constraints,
+      sheetAnimationStyle: AnimationStyle.noAnimation,
+    );
+  }
   if (!usesAppleGlass) {
     return showModalBottomSheet<T>(
       context: context,
