@@ -7,6 +7,8 @@ import 'package:wild/services/epub/local_epub_library.dart';
 import 'package:wild/services/epub/epub_css_reader.dart';
 import 'theme_cubit.dart';
 import 'package:wild/models/reader_document.dart';
+import 'package:wild/models/reader_mark.dart';
+import 'package:wild/services/reader_mark_text.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:wild/models/reader_page.dart';
@@ -67,11 +69,13 @@ class ReaderCubit extends Cubit<ReaderState> {
   /// Optional display policy; absent callers keep the original EPUB recipe.
   final bool Function()? einkMode;
   final Future<void>? layoutReady;
+  Future<bool>? _initialRouteArrival;
   EpubBookFlow? _bookFlow;
   EpubFlowWindow? _bookWindow;
   bool _warmingBook = false;
   bool _reflowingBook = false;
   int _request = 0;
+  int _seekGeneration = 0;
   ReadRequest? _readRequest;
   String? _loadedContent;
   ReaderDocument? _loadedDocument;
@@ -122,6 +126,7 @@ class ReaderCubit extends Cubit<ReaderState> {
     this.readerTheme,
     this.einkMode,
     this.layoutReady,
+    Future<bool>? initialRouteArrival,
     Future<SourceChapter> Function({required String aid, required String cid})?
     read,
     int Function(String aid)? sessionGeneration,
@@ -129,7 +134,8 @@ class ReaderCubit extends Cubit<ReaderState> {
     ReaderPrefetchLoad? prefetch,
     Future<ReaderPosition?> Function(String bookId, String chapterId)?
     loadPosition,
-  }) : _read =
+  }) : _initialRouteArrival = initialRouteArrival,
+       _read =
            read == null
                ? readerChapter
                : (({
@@ -175,6 +181,8 @@ class ReaderCubit extends Cubit<ReaderState> {
     String? cid,
     int? initialPage,
     int? initialTextOffset,
+    int? initialSourceOffset,
+    ReaderMark? readerMark,
   }) async {
     if (_closing || isClosed) return;
     final request = ++_request;
@@ -182,13 +190,28 @@ class ReaderCubit extends Cubit<ReaderState> {
     final readRequest = _readRequest = ReadRequest();
     final targetAid = aid ?? initialAid;
     final targetCid = cid ?? initialCid;
-    if (sourceOf(targetAid) == SourceId.localEpub) {
+    if (supportsLocalEpub && sourceOf(targetAid) == SourceId.localEpub) {
+      final anchor = readerMark?.location;
       await _loadLocalBook(
         targetAid,
         targetCid,
         request,
-        initialPage: initialPage,
-        initialTextOffset: initialTextOffset,
+        initialPage:
+            anchor?.axis == ReaderMarkAxis.page ? anchor!.offset : initialPage,
+        initialTextOffset: readerMark == null ? initialTextOffset : null,
+        initialSourceOffset: readerMark == null ? initialSourceOffset : null,
+        position:
+            anchor == null || anchor.axis == ReaderMarkAxis.page
+                ? null
+                : ReaderPosition(
+                  anchor.axis == ReaderMarkAxis.text ? anchor.offset : 0,
+                  anchor.imageIndex ?? 0,
+                  anchor.imageIndex != null,
+                  epubOffset:
+                      anchor.axis == ReaderMarkAxis.epubDom
+                          ? anchor.offset
+                          : null,
+                ),
       );
       return;
     }
@@ -224,6 +247,16 @@ class ReaderCubit extends Cubit<ReaderState> {
       );
       if (_closing || isClosed || request != _request || !sourceMatches()) {
         return;
+      }
+      if (_initialRouteArrival case final arrival?) {
+        // Start the source request immediately. Only the first synchronous
+        // page layout waits for the iOS slide and its final system insets.
+        if (!await readRequest.wait(arrival)) return;
+        if (layoutReady case final ready?) await readRequest.wait(ready);
+        _initialRouteArrival = null;
+        if (_closing || isClosed || request != _request || !sourceMatches()) {
+          return;
+        }
       }
       if (_session(targetAid) != session) {
         emit(ReaderError('账号已变化，请重新打开章节。'));
@@ -273,6 +306,8 @@ class ReaderCubit extends Cubit<ReaderState> {
       }
       if (savedPosition != null) {
         pageIndex = savedPosition.pageIn(pages);
+      } else if (initialSourceOffset != null && initialSourceOffset >= 0) {
+        pageIndex = _pageAtSourceOffset(pages, initialSourceOffset);
       } else if (_loadedDocument != null &&
           initialTextOffset != null &&
           initialTextOffset >= 0) {
@@ -286,6 +321,15 @@ class ReaderCubit extends Cubit<ReaderState> {
             priorImage
                 ? initialPage
                 : ReaderPosition(initialTextOffset, 0, false).pageIn(pages);
+      }
+      if (readerMark != null) {
+        pageIndex =
+            _markPageIndex(
+              readerMark,
+              pages,
+              readerMarkText(content, chapter.document),
+            ) ??
+            pageIndex;
       }
 
       // 计算从第一页到当前页的累计字数
@@ -469,7 +513,81 @@ class ReaderCubit extends Cubit<ReaderState> {
     }
   }
 
+  /// Online counts are chapter-local. Local EPUBs use the owning chapter's
+  /// complete pagination, never the changing 64-page preloading window.
+  String get footerPageLabel {
+    final currentState = state;
+    if (currentState is! ReaderLoaded || currentState.pages.isEmpty) return '';
+    final layout = currentState.layout;
+    final first = layout.firstPage(
+      layout.viewIndex(currentState.currentPageIndex),
+    );
+    final last = (first + (layout.isSpread ? 1 : 0)).clamp(
+      0,
+      currentState.pages.length - 1,
+    );
+    String range(int from, int to, int count) =>
+        from == to ? '${from + 1}/$count' : '${from + 1}–${to + 1}/$count';
+    final window = _bookWindow;
+    if (window == null) {
+      return '本章 ${range(first, last, currentState.pages.length)}';
+    }
+    final left = window.refs[first], right = window.refs[last];
+    if (identical(left.owner, right.owner)) {
+      return '本章 ${range(left.localIndex, right.localIndex, left.owner.pages.length)}';
+    }
+    return '${left.localIndex + 1}/${left.owner.pages.length} · '
+        '${right.localIndex + 1}/${right.owner.pages.length}';
+  }
+
+  /// The full owning chapter, never the rolling EPUB preload window.
+  ({int index, int count, Object revision}) get chapterProgress {
+    final loaded = state;
+    if (loaded is! ReaderLoaded || loaded.pages.isEmpty) {
+      return (index: 0, count: 1, revision: this);
+    }
+    final ref = _bookWindow?.refs[loaded.currentPageIndex];
+    return (
+      index: ref?.localIndex ?? loaded.currentPageIndex,
+      count: ref?.owner.pages.length ?? loaded.pages.length,
+      revision: Object.hash(
+        loaded.aid,
+        loaded.cid,
+        loaded.layout,
+        ref?.owner.pages ?? loaded.pages,
+      ),
+    );
+  }
+
+  Future<void> seekChapterPage(int page) async {
+    final intent = ++_seekGeneration, request = _request;
+    final loaded = state;
+    if (loaded is! ReaderLoaded) return;
+    final window = _bookWindow, flow = _bookFlow;
+    if (window == null || flow == null) {
+      if (page < 0 || page >= loaded.pages.length) return;
+      onPageChanged(loaded.layout.firstPage(loaded.layout.viewIndex(page)));
+      return;
+    }
+    if (_reflowingBook) return;
+    final ref = window.refs[loaded.currentPageIndex];
+    if (page < 0 || page >= ref.owner.pages.length) return;
+    final next = await flow.open(ref.owner.chapter.cid, initialPage: page);
+    // A stale scrub must never put a reader back into the old chapter.
+    if (isClosed ||
+        !flow.current ||
+        !identical(flow, _bookFlow) ||
+        intent != _seekGeneration ||
+        request != _request ||
+        state is! ReaderLoaded) {
+      return;
+    }
+    _publishBook(next, loaded.layout, loaded.fontFamily, state.showControls);
+    _warmLocalBook();
+  }
+
   void onPageChanged(int index) {
+    _seekGeneration++;
     if (state is ReaderLoaded) {
       final currentState = state as ReaderLoaded;
       if (index < 0 || index >= currentState.pages.length) return;
@@ -491,6 +609,214 @@ class ReaderCubit extends Cubit<ReaderState> {
 
       _savePageHistory(state as ReaderLoaded);
     }
+  }
+
+  ReaderMarkChapterText? markText(
+    ReaderMarkChapter chapter,
+    ReaderMarkAxis axis,
+  ) {
+    if (axis == ReaderMarkAxis.page) return null;
+    final window = _bookWindow;
+    if (window != null) {
+      for (final ref in window.refs) {
+        final owner = ref.owner;
+        if (owner.chapter.aid == chapter.aid &&
+            owner.chapter.cid == chapter.cid) {
+          final data = owner.data;
+          if (axis == ReaderMarkAxis.epubDom) {
+            final text = ref.page.cssPage?.markText;
+            return text == null ? null : (text: text, encoded: false);
+          }
+          return (
+            text: readerMarkText(data.content, data.document),
+            encoded: data.fontFamily != null,
+          );
+        }
+      }
+    }
+    if (axis != ReaderMarkAxis.text) return null;
+    final content = _loadedContent;
+    if (chapter.aid != _contentAid ||
+        chapter.cid != _contentCid ||
+        content == null) {
+      return null;
+    }
+    return (
+      text: readerMarkText(content, _loadedDocument),
+      encoded: _sourceFont != null,
+    );
+  }
+
+  ReaderMarkLocation markLocation(ReaderLoaded loaded) {
+    final index = loaded.currentPageIndex;
+    final ref = _bookWindow?.refs[index];
+    final page = loaded.pages[index];
+    final chapter = (aid: loaded.aid, cid: page.chapterId ?? loaded.cid);
+    final title = page.chapterTitle ?? loaded.title;
+    if (page.cssPage case final css?) {
+      return ReaderMarkLocation(
+        chapter,
+        title,
+        ReaderMarkAxis.epubDom,
+        css.domStart,
+      );
+    }
+    if (page.markStart case final start?) {
+      return ReaderMarkLocation(
+        chapter,
+        title,
+        ReaderMarkAxis.text,
+        start,
+        imageIndex: page.isImage ? ref?.position.precedingImages ?? 0 : null,
+      );
+    }
+    return ReaderMarkLocation(
+      chapter,
+      title,
+      ReaderMarkAxis.page,
+      ref?.localIndex ?? index,
+    );
+  }
+
+  int listeningOffset(ReaderLoaded loaded, String text) {
+    final page = loaded.pages[loaded.currentPageIndex];
+    final css = page.cssPage;
+    final domText = css?.markText;
+    if (css != null && domText != null) {
+      return matchEpubTextOffset(domText, css.domStart, text) ??
+          page.textStart ??
+          0;
+    }
+    return page.markStart ?? 0;
+  }
+
+  bool markOnPage(ReaderLoaded loaded, ReaderMarkLocation location) {
+    final current = markLocation(loaded);
+    if (current.chapter != location.chapter || current.axis != location.axis) {
+      return false;
+    }
+    if (current.samePosition(location)) return true;
+    final page = loaded.pages[loaded.currentPageIndex];
+    final end = page.cssPage?.domEnd ?? page.markEnd;
+    return end != null &&
+        location.imageIndex == null &&
+        current.imageIndex == null &&
+        location.offset >= current.offset &&
+        location.offset < end;
+  }
+
+  int _pageAtSourceOffset(List<ReaderPage> pages, int offset) {
+    var selected = 0;
+    for (var i = 0; i < pages.length; i++) {
+      final start = pages[i].markStart;
+      if (start == null) continue;
+      if (start > offset) break;
+      selected = i;
+      if (pages[i].isImage && start == offset) break;
+    }
+    return selected;
+  }
+
+  /// Maps a content anchor to the complete owning chapter's pagination.
+  int? markPageNumber(ReaderMarkLocation location) {
+    final loaded = state;
+    if (loaded is! ReaderLoaded) return null;
+    final chapter = location.chapter;
+    final window = _bookWindow;
+    final List<ReaderPage> pages;
+    if (window == null) {
+      if (loaded.aid != chapter.aid || loaded.cid != chapter.cid) return null;
+      pages = loaded.pages;
+    } else {
+      final ref =
+          window.refs.where((ref) {
+            final owner = ref.owner.chapter;
+            return owner.aid == chapter.aid && owner.cid == chapter.cid;
+          }).firstOrNull;
+      if (ref == null) return null;
+      pages = ref.owner.pages;
+    }
+    final index = _pageIndexForMark(location, pages, location.offset);
+    return index == null ? null : index + 1;
+  }
+
+  int? savedMarkPageNumber(ReaderMark mark) {
+    final location = mark.location;
+    if (mark.isBookmark) return markPageNumber(location);
+    final text = markText(location.chapter, location.axis)?.text;
+    final offset = text == null ? null : mark.offsetIn(text);
+    return offset == null ? null : markPageNumber(location.at(offset));
+  }
+
+  int? _markPageIndex(ReaderMark mark, List<ReaderPage> pages, String text) {
+    final location = mark.location;
+    final offset =
+        location.axis == ReaderMarkAxis.page
+            ? location.offset
+            : mark.offsetIn(text);
+    return offset == null ? null : _pageIndexForMark(location, pages, offset);
+  }
+
+  int? _pageIndexForMark(
+    ReaderMarkLocation location,
+    List<ReaderPage> pages,
+    int offset,
+  ) {
+    if (location.axis == ReaderMarkAxis.page) {
+      return offset < pages.length ? offset : null;
+    }
+    for (var i = 0; i < pages.length; i++) {
+      final page = pages[i];
+      if (location.axis == ReaderMarkAxis.epubDom) {
+        final css = page.cssPage;
+        if (css != null &&
+            (css.domStart == offset ||
+                css.domStart < offset && offset < css.domEnd)) {
+          return i;
+        }
+      } else if (page.cssPage != null) {
+        continue;
+      } else if (location.imageIndex != null) {
+        if (page.isImage && page.markStart == offset) return i;
+      } else if (!page.isImage &&
+          page.markStart != null &&
+          page.markEnd != null &&
+          offset >= page.markStart! &&
+          offset < page.markEnd!) {
+        return i;
+      }
+    }
+    return null;
+  }
+
+  Future<bool> openMark(ReaderMark mark) async {
+    final chapter = mark.location.chapter;
+    final before = state;
+    final local = sourceOf(chapter.aid) == SourceId.localEpub;
+    if (!local &&
+        before is ReaderLoaded &&
+        before.aid == chapter.aid &&
+        before.cid == chapter.cid) {
+      final text = markText(chapter, ReaderMarkAxis.text)?.text ?? '';
+      final page = _markPageIndex(mark, before.pages, text);
+      if (page == null) return false;
+      onPageChanged(page);
+      return true;
+    }
+    await loadChapter(aid: chapter.aid, cid: chapter.cid, readerMark: mark);
+    final after = state;
+    if (after is! ReaderLoaded ||
+        after.aid != chapter.aid ||
+        after.cid != chapter.cid) {
+      return false;
+    }
+    if (local) return markLocation(after).axis == mark.location.axis;
+    return _markPageIndex(
+          mark,
+          after.pages,
+          markText(chapter, ReaderMarkAxis.text)?.text ?? '',
+        ) !=
+        null;
   }
 
   void _savePageHistory(ReaderLoaded currentState) {
@@ -672,10 +998,12 @@ class ReaderCubit extends Cubit<ReaderState> {
     int request, {
     int? initialPage,
     int? initialTextOffset,
+    int? initialSourceOffset,
     ReaderPosition? position,
     bool? preserveControls,
     bool showLoading = true,
   }) async {
+    if (!supportsLocalEpub) return;
     final controls = preserveControls ?? state.showControls;
     final session = _session(aid);
     bool current() =>
@@ -799,6 +1127,26 @@ class ReaderCubit extends Cubit<ReaderState> {
         initialPage: initialPage ?? 0,
       );
       if (!current() || !identical(_bookFlow, flow)) return;
+      if (position == null && initialSourceOffset != null) {
+        final chapter = window.refs[window.index].owner;
+        final pages = chapter.pages;
+        if (pages.first.cssPage?.markText case final domText?) {
+          final data = chapter.data;
+          final offset = matchEpubTextOffset(
+            readerMarkText(data.content, data.document),
+            initialSourceOffset,
+            domText,
+          );
+          if (offset != null) {
+            position = ReaderPosition(0, 0, false, epubOffset: offset);
+          }
+        }
+        final index =
+            position?.pageIn(pages) ??
+            _pageAtSourceOffset(pages, initialSourceOffset);
+        if (index != 0) window = await flow.open(cid, initialPage: index);
+        if (!current() || !identical(_bookFlow, flow)) return;
+      }
       // The old paper remains interactive during font/viewport reflow. Resolve
       // the latest chapter-local anchor after asynchronous neighbour reads.
       // Reuse an already shaped page whenever it is inside this new window.
@@ -915,7 +1263,7 @@ class ReaderCubit extends Cubit<ReaderState> {
       ),
     );
     _savePageHistory(state as ReaderLoaded);
-    if (_cssReader != null) {
+    if (supportsLocalEpub && _cssReader != null) {
       unawaited(EpubCssReader.warm(window.pages, window.index));
     }
   }

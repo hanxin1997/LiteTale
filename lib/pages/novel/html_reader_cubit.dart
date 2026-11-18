@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:wild/services/read_request.dart';
 import 'package:wild/utils/wenku8_network_error.dart';
 import 'package:wild/models/reader_document.dart';
+import 'package:wild/services/reader_mark_text.dart';
 import 'package:wild/services/reader_chapter_prefetch.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:equatable/equatable.dart';
@@ -36,25 +37,26 @@ class HtmlReaderError extends HtmlReaderState {
 
 // 解析后的内容类型
 abstract class ParsedContent extends Equatable {
-  const ParsedContent();
+  const ParsedContent({this.offset = 0});
+  final int offset;
 }
 
 class ParsedText extends ParsedContent {
   final String text;
 
-  const ParsedText(this.text);
+  const ParsedText(this.text, {super.offset});
 
   @override
-  List<Object?> get props => [text];
+  List<Object?> get props => [text, offset];
 }
 
 class ParsedImage extends ParsedContent {
   final String imageUrl;
 
-  const ParsedImage(this.imageUrl);
+  const ParsedImage(this.imageUrl, {super.offset});
 
   @override
-  List<Object?> get props => [imageUrl];
+  List<Object?> get props => [imageUrl, offset];
 }
 
 class ParsedStyledText extends ParsedContent {
@@ -62,12 +64,13 @@ class ParsedStyledText extends ParsedContent {
     this.block, {
     this.previousStyle,
     this.endOfTextRun = false,
+    super.offset,
   });
   final ReaderBlock block;
   final ReaderBlockStyle? previousStyle;
   final bool endOfTextRun;
   @override
-  List<Object?> get props => [block, previousStyle, endOfTextRun];
+  List<Object?> get props => [block, previousStyle, endOfTextRun, offset];
 }
 
 // 加载完成状态
@@ -79,6 +82,8 @@ class HtmlReaderLoaded extends HtmlReaderState {
   final List<ParsedContent> parsedContent;
   final List<Volume> volumes;
   final String? sourceFont;
+  final String? markContent;
+  final int initialOffset;
 
   const HtmlReaderLoaded({
     required this.aid,
@@ -88,6 +93,8 @@ class HtmlReaderLoaded extends HtmlReaderState {
     required this.parsedContent,
     required this.volumes,
     this.sourceFont,
+    this.markContent,
+    this.initialOffset = 0,
   });
 
   HtmlReaderLoaded copyWith({
@@ -106,6 +113,8 @@ class HtmlReaderLoaded extends HtmlReaderState {
       parsedContent: parsedContent ?? this.parsedContent,
       volumes: volumes ?? this.volumes,
       sourceFont: sourceFont,
+      markContent: markContent,
+      initialOffset: initialOffset,
     );
   }
 
@@ -118,6 +127,8 @@ class HtmlReaderLoaded extends HtmlReaderState {
     parsedContent,
     volumes,
     sourceFont,
+    markContent,
+    initialOffset,
   ];
 }
 
@@ -125,6 +136,7 @@ class HtmlReaderCubit extends Cubit<HtmlReaderState> {
   int _request = 0;
   ReadRequest? _readRequest;
   bool _closing = false;
+  Future<bool>? _initialRouteArrival;
   final Future<SourceChapter> Function({
     required String aid,
     required String cid,
@@ -138,18 +150,27 @@ class HtmlReaderCubit extends Cubit<HtmlReaderState> {
   final String initialAid;
   final String initialCid;
   final List<Volume> initialVolumes;
+  int? _initialTextOffset;
+  int? _contentSession;
+  int? _contentSourceRevision;
+  int _lastSavedOffset = 0;
+  (String, String)? _requestedChapter;
 
   HtmlReaderCubit({
     required this.novelInfo,
     required this.initialAid,
     required this.initialCid,
     required this.initialVolumes,
+    int? initialTextOffset,
+    Future<bool>? initialRouteArrival,
     Future<SourceChapter> Function({required String aid, required String cid})?
     read,
     int Function(String aid)? sessionGeneration,
     ReadingProgressQueue? progress,
     ReaderPrefetchLoad? prefetch,
-  }) : _read =
+  }) : _initialRouteArrival = initialRouteArrival,
+       _initialTextOffset = initialTextOffset,
+       _read =
            read == null
                ? w8.readerChapter
                : (({
@@ -176,9 +197,17 @@ class HtmlReaderCubit extends Cubit<HtmlReaderState> {
     throw Exception('Volume not found');
   }
 
-  void _updateHistory(String aid, String cid, String title, int session) {
+  void _updateHistory(
+    String aid,
+    String cid,
+    String title,
+    int session,
+    int offset,
+  ) {
     final volume = _findVolume(aid, cid);
     final sessionFor = _session;
+    final source = sourceOf(aid);
+    final revision = sourceRevision.value;
     _progress.enqueue(
       ReadingProgress(
         bookId: aid,
@@ -187,14 +216,42 @@ class HtmlReaderCubit extends Cubit<HtmlReaderState> {
         volumeTitle: volume.title,
         chapterId: cid,
         chapterTitle: title,
-        characters: 0,
-        page: 0,
+        characters: offset,
+        page: scrollReaderProgressPage,
         cover: novelInfo.imgUrl,
         author: novelInfo.author,
       ),
-      isValid: () => sessionFor(aid) == session,
+      isValid:
+          () =>
+              sessionFor(aid) == session &&
+              (source != SourceId.bili ||
+                  (activeSource.value == source &&
+                      sourceRevision.value == revision)),
     );
   }
+
+  void recordVisibleOffset(String aid, String cid, int offset) {
+    final current = state;
+    final session = _contentSession;
+    if (_closing ||
+        current is! HtmlReaderLoaded ||
+        current.aid != aid ||
+        current.cid != cid ||
+        session == null ||
+        _session(aid) != session ||
+        (sourceOf(aid) == SourceId.bili &&
+            (activeSource.value != SourceId.bili ||
+                sourceRevision.value != _contentSourceRevision)) ||
+        offset < 0 ||
+        offset == _lastSavedOffset) {
+      return;
+    }
+    _lastSavedOffset = offset;
+    _updateHistory(aid, cid, current.title, session, offset);
+  }
+
+  Future<void> retryChapter() =>
+      loadChapter(aid: _requestedChapter?.$1, cid: _requestedChapter?.$2);
 
   List<ParsedContent> _parseContent(
     String content, {
@@ -203,14 +260,24 @@ class HtmlReaderCubit extends Cubit<HtmlReaderState> {
     if (document != null) {
       final result = <ParsedContent>[];
       ReaderBlockStyle? previous;
-      final visible =
-          document.blocks
-              .where((block) => block.imageUrl != null || block.text.isNotEmpty)
-              .toList();
-      for (var index = 0; index < visible.length; index++) {
-        final block = visible[index];
+      final visible = <(ReaderBlock, int)>[];
+      var offset = 0;
+      for (final block in document.blocks) {
+        if (block.imageUrl != null || block.text.isNotEmpty) {
+          visible.add((block, offset));
+        }
         if (block.imageUrl != null || block.artworkUrl != null) {
-          result.add(ParsedImage(block.artworkUrl ?? block.imageUrl!));
+          offset += block.plainText.length + 1;
+        } else if (block.text.isNotEmpty) {
+          offset += block.text.length + 1;
+        }
+      }
+      for (var index = 0; index < visible.length; index++) {
+        final (block, offset) = visible[index];
+        if (block.imageUrl != null || block.artworkUrl != null) {
+          result.add(
+            ParsedImage(block.artworkUrl ?? block.imageUrl!, offset: offset),
+          );
           previous = null;
         } else if (block.text.isNotEmpty) {
           result.add(
@@ -219,7 +286,8 @@ class HtmlReaderCubit extends Cubit<HtmlReaderState> {
               previousStyle: previous,
               endOfTextRun:
                   index == visible.length - 1 ||
-                  visible[index + 1].imageUrl != null,
+                  visible[index + 1].$1.imageUrl != null,
+              offset: offset,
             ),
           );
           previous = block.style;
@@ -228,41 +296,17 @@ class HtmlReaderCubit extends Cubit<HtmlReaderState> {
       return result;
     }
     final parsedContent = <ParsedContent>[];
-    final paragraphs = content.split('\n');
-
-    for (var paragraph in paragraphs) {
-      if (paragraph.trim().isEmpty) continue;
-
-      // 检查是否包含图片标签
-      final regex = RegExp(r'<!--image-->([^<]+)<!--image-->');
-      if (regex.hasMatch(paragraph)) {
-        var currentText = paragraph;
-        while (regex.hasMatch(currentText)) {
-          var match = regex.firstMatch(currentText)!;
-
-          // 处理图片前的文本
-          if (match.start > 0) {
-            var text = currentText.substring(0, match.start).trim();
-            if (text.isNotEmpty) {
-              parsedContent.add(ParsedText(text));
-            }
-          }
-
-          // 处理图片
-          final imageUrl = match.group(1)!;
-          parsedContent.add(ParsedImage(imageUrl));
-
-          // 更新剩余文本
-          currentText = currentText.substring(match.end);
-        }
-
-        // 处理最后剩余的文本
-        if (currentText.trim().isNotEmpty) {
-          parsedContent.add(ParsedText(currentText.trim()));
-        }
-      } else {
-        // 普通文本段落
-        parsedContent.add(ParsedText(paragraph));
+    for (final part in readerPlainParts(content)) {
+      if (part.image) {
+        parsedContent.add(ParsedImage(part.text, offset: part.offset));
+      } else if (part.text.trim().isNotEmpty) {
+        final text = part.mixed ? part.text.trim() : part.text;
+        parsedContent.add(
+          ParsedText(
+            text,
+            offset: part.offset + (part.mixed ? part.text.indexOf(text) : 0),
+          ),
+        );
       }
     }
 
@@ -276,6 +320,7 @@ class HtmlReaderCubit extends Cubit<HtmlReaderState> {
     final readRequest = _readRequest = ReadRequest();
     final targetAid = aid ?? initialAid;
     final targetCid = cid ?? initialCid;
+    _requestedChapter = (targetAid, targetCid);
     _prefetch?.foreground(targetAid, targetCid);
     final session = _session(targetAid);
     final revision = sourceRevision.value;
@@ -334,15 +379,33 @@ class HtmlReaderCubit extends Cubit<HtmlReaderState> {
         ),
       );
       if (!current()) return;
+      if (_initialRouteArrival case final arrival?) {
+        if (!await readRequest.wait(arrival)) return;
+        _initialRouteArrival = null;
+        if (!current()) return;
+      }
       final rawContent = chapter.content;
       final parsedContent = _parseContent(
         rawContent,
         document: chapter.document,
       );
+      final markContent =
+          chapter.document == null
+              ? null
+              : readerMarkText(rawContent, chapter.document);
+      final saved =
+          targetAid == initialAid && targetCid == initialCid
+              ? _initialTextOffset ?? 0
+              : 0;
+      final offset = saved.clamp(0, (markContent ?? rawContent).length);
 
       // 更新阅读历史
       if (!current()) return;
-      _updateHistory(targetAid, targetCid, chapterTitle, session);
+      _initialTextOffset = null;
+      _contentSession = session;
+      _contentSourceRevision = revision;
+      _lastSavedOffset = offset;
+      _updateHistory(targetAid, targetCid, chapterTitle, session, offset);
 
       emit(
         HtmlReaderLoaded(
@@ -353,6 +416,8 @@ class HtmlReaderCubit extends Cubit<HtmlReaderState> {
           parsedContent: parsedContent,
           volumes: initialVolumes,
           sourceFont: chapter.fontFamily,
+          markContent: markContent,
+          initialOffset: offset,
         ),
       );
       _prefetch?.schedule(

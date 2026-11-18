@@ -3,6 +3,10 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:wild/services/bili_browser.dart';
 import 'package:wild/utils/bili_site_dom.dart';
 import 'package:wild/services/read_request.dart';
+import 'package:flutter/foundation.dart';
+import 'package:wild/sources/bili_site_source.dart';
+
+const _cdnCover = 'https://img2.readpai.com/image/2/2844/2844s.jpg?1749303677';
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -11,7 +15,6 @@ void main() {
     Duration timeout = const Duration(seconds: 1),
   }) {
     final s = BiliBrowserSession(
-      startupGrace: Duration.zero,
       operationTimeout: timeout,
       pollInterval: const Duration(milliseconds: 1),
     );
@@ -26,6 +29,8 @@ void main() {
     final result = await s.search('seabed', 1);
     expect(result.records.single.aid, 'bili:2844');
     expect(result.records.single.title, 'SeaBed');
+    expect(result.records.single.img, _cdnCover);
+    expect(BiliBrowserSession.allowsNavigation(_cdnCover), isFalse);
     expect(p.urls, ['https://www.bilinovel.net/search.html', 'about:blank']);
     expect(p.submitted, true);
   });
@@ -33,7 +38,6 @@ void main() {
     'cold renderer attachment uses the remaining operation budget',
     () async {
       final s = BiliBrowserSession(
-        startupGrace: Duration.zero,
         operationTimeout: const Duration(seconds: 8),
         pollInterval: const Duration(milliseconds: 1),
       );
@@ -53,7 +57,6 @@ void main() {
     () async {
       final s = BiliBrowserSession(
         operationTimeout: const Duration(milliseconds: 40),
-        startupGrace: Duration.zero,
       );
       addTearDown(s.dispose);
       await expectLater(
@@ -74,30 +77,90 @@ void main() {
       'about:blank',
     ]);
   });
+  for (final platform in [TargetPlatform.iOS, TargetPlatform.android]) {
+    test('public comments use the real browser loader on $platform', () async {
+      debugDefaultTargetPlatformOverride = platform;
+      addTearDown(() => debugDefaultTargetPlatformOverride = null);
+      final port =
+          _Port()
+            ..documentHtml = '''<ol id="list_content" class="book-ol-comment">
+<li class="book-li"><a class="book-layout" href="/reviewshow_42_1.html">
+<div class="book-meta-l"><em>读者</em></div><time>2026-11-01</time>
+<div class="book-comment-p">原站公开评论</div></a></li></ol>
+<div class="pagebar"><a href="/reviews_88_2.html">下一页</a></div>''';
+      final browser = session(port);
+      final source = BiliSiteSource(
+        searcher: (_, __) => throw StateError('not used'),
+        chapterLoader: (_, __) => throw StateError('not used'),
+        documentLoader: browser.document,
+      );
+      final first = await source.comments('bili:88');
+      expect(first.items.single.content, '原站公开评论');
+      expect(first.hasMore, true);
+      port.documentHtml = port.documentHtml!.replaceAll('42_1', '43_1');
+      final second = await source.comments('bili:88', page: 2);
+      expect(second.items.single.id, isNot(first.items.single.id));
+      expect(port.urls, [
+        'https://www.bilinovel.net/reviews_88_1.html',
+        'about:blank',
+        'https://www.bilinovel.net/reviews_88_2.html',
+        'about:blank',
+      ]);
+      expect(port.modes, [false, false]);
+    });
+  }
+  test('allows only well-formed public review list routes', () {
+    expect(
+      BiliBrowserSession.allowsNavigation(
+        'https://www.bilinovel.net/reviews_88_1.html',
+      ),
+      true,
+    );
+    for (final url in [
+      'https://evil.example/reviews_88_1.html',
+      'http://www.bilinovel.net/reviews_88_1.html',
+      'https://www.bilinovel.net:444/reviews_88_1.html',
+      'https://user:pass@www.bilinovel.net/reviews_88_1.html',
+      'https://www.bilinovel.net/reviews_0_1.html',
+      'https://www.bilinovel.net/reviews_88_0.html',
+      'https://www.bilinovel.net/reviews_88_1.html?next=https://evil.example',
+      'https://www.bilinovel.net/reviews_88_1.html#other',
+      'https://www.bilinovel.net/reviewshow_42_1.html',
+    ]) {
+      expect(BiliBrowserSession.allowsNavigation(url), false, reason: url);
+    }
+  });
   test('real next search link is associated with its query', () async {
     final p =
-        _Port()..next = 'https://www.linovelib.com/S6/?page=2&searchkey=sea';
+        _Port()..next = 'https://www.bilinovel.net/S6/?page=2&searchkey=sea';
     final s = session(p);
     expect((await s.search('sea', 1)).maxPage, 2);
     p.next = null;
     expect((await s.search('sea', 2)).currentPage, 2);
     expect(
       p.urls,
-      contains('https://www.linovelib.com/S6/?page=2&searchkey=sea'),
+      contains('https://www.bilinovel.net/S6/?page=2&searchkey=sea'),
     );
     await expectLater(
       s.search('different', 2),
       throwsA(isA<BiliBrowserException>()),
     );
   });
-  test('rejects foreign search pagination instead of following it', () async {
-    final p = _Port()..next = 'https://other.example/S6/?page=2';
-    await expectLater(
-      session(p).search('sea', 1),
-      throwsA(isA<BiliBrowserException>()),
-    );
-    expect(p.urls.every(BiliBrowserSession.allowsNavigation), true);
-  });
+  test(
+    'a foreign next link leaves the current search results usable',
+    () async {
+      final p = _Port()..next = 'https://other.example/S6/?page=2';
+      final browser = session(p);
+      final first = await browser.search('sea', 1);
+      expect(first.records.single.title, 'SeaBed');
+      expect(first.maxPage, 1);
+      await expectLater(
+        browser.search('sea', 2),
+        throwsA(isA<BiliBrowserException>()),
+      );
+      expect(p.urls.every(BiliBrowserSession.allowsNavigation), true);
+    },
+  );
   test('search pagination waits for its committed URL and next link', () async {
     final p =
         _Port()
@@ -151,7 +214,8 @@ void main() {
       contains('https://www.bilinovel.net/search.html?searchkey=sea&page=2'),
     );
     p.next = 'https://www.bilinovel.net/search.html?searchkey=different&page=2';
-    await expectLater(s.search('sea', 1), throwsA(isA<BiliBrowserException>()));
+    expect((await s.search('sea', 1)).maxPage, 1);
+    await expectLater(s.search('sea', 2), throwsA(isA<BiliBrowserException>()));
   });
   test(
     'waits for navigation instead of accepting the previous document',
@@ -440,6 +504,7 @@ class _Port implements BiliBrowserPort {
   int? chapterPages;
   bool submitted = false, blank = false, stall = false;
   String? staleDocumentUrl;
+  String? documentHtml;
   int documentProbes = 0;
   int searchProbes = 0;
   final searchResponses = <Map<String, dynamic>>[];
@@ -481,7 +546,7 @@ class _Port implements BiliBrowserPort {
       return {
         'url': url,
         'ready': true,
-        'html': '<div id="volume-list"></div>',
+        'html': documentHtml ?? '<div id="volume-list"></div>',
       };
     }
     if (script == biliHomeReadyScript) return {'url': current, 'ready': true};
@@ -495,7 +560,11 @@ class _Port implements BiliBrowserPort {
           {
             'nid': '2844',
             'title': 'SeaBed',
-            'image': 'https://www.linovelib.com/cover.jpg',
+            'images': [
+              'https://img2.readpai.com.example.test/image/2/2844/2844s.jpg',
+              '/themes/zhmb/images/book-cover-no.svg',
+              _cdnCover,
+            ],
           },
         ],
         'next': next,
@@ -525,7 +594,7 @@ class _Port implements BiliBrowserPort {
       };
     }
     submitted = true;
-    current = 'https://www.linovelib.com/novel/2844.html';
+    current = '${Uri.parse(current).origin}/novel/2844.html';
     return true;
   }
 }

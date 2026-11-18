@@ -1,13 +1,23 @@
-import 'package:flutter/material.dart';
 import 'package:wild/eink/eink_policy.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter/physics.dart';
+import 'package:wild/theme/ios_page_arrival.dart';
 
-/// A page covers its predecessor from the right and uncovers it to the right.
-/// The page underneath stays still. No opacity, scale, or shared-element work is
-/// performed during the transition.
+/// Wait until the pushed page's overlay is removed. A normal push Future
+/// resolves as soon as pop starts, while the previous page is still being drawn.
+Future<T?> pushAndWaitForPageExit<T>(
+  BuildContext context,
+  PageRoute<T> page,
+) async {
+  final result = await Navigator.of(context).push(page);
+  await page.completed;
+  return result;
+}
+
 const horizontalPageTransitionsTheme = PageTransitionsTheme(
   builders: {
     TargetPlatform.android: HorizontalCoverPageTransitionsBuilder(),
-    TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+    TargetPlatform.iOS: LiteTaleCupertinoTransitionsBuilder(),
     TargetPlatform.fuchsia: HorizontalCoverPageTransitionsBuilder(),
     TargetPlatform.linux: HorizontalCoverPageTransitionsBuilder(),
     TargetPlatform.macOS: HorizontalCoverPageTransitionsBuilder(),
@@ -15,6 +25,7 @@ const horizontalPageTransitionsTheme = PageTransitionsTheme(
   },
 );
 
+/// Slides over a stationary predecessor on platforms without Cupertino motion.
 class HorizontalCoverPageTransitionsBuilder extends PageTransitionsBuilder {
   const HorizontalCoverPageTransitionsBuilder();
 
@@ -67,19 +78,66 @@ class HorizontalCoverPageRoute<T> extends MaterialPageRoute<T> {
     required super.builder,
     super.settings,
     super.fullscreenDialog,
+    this.animateEntrance = true,
+    this.cachePageDuringTransition = false,
   });
+
+  final bool animateEntrance;
+  final bool cachePageDuringTransition;
+
+  bool get _eink {
+    final context = navigator?.context;
+    return context != null && einkEnabled(context, listen: false);
+  }
+
+  bool get _usesIosMotion {
+    final context = navigator?.context;
+    return context != null && Theme.of(context).platform == TargetPlatform.iOS;
+  }
+
+  bool get _reduceMotion {
+    final context = navigator?.context;
+    return context != null &&
+        MediaQuery.maybeDisableAnimationsOf(context) == true;
+  }
 
   @override
   Duration get transitionDuration =>
-      _einkEnabled ? Duration.zero : const Duration(milliseconds: 300);
+      _eink || !animateEntrance || (_usesIosMotion && _reduceMotion)
+          ? Duration.zero
+          : const Duration(milliseconds: 300);
 
   @override
   Duration get reverseTransitionDuration =>
-      _einkEnabled ? Duration.zero : const Duration(milliseconds: 300);
+      _eink || (_usesIosMotion && _reduceMotion)
+          ? Duration.zero
+          : const Duration(milliseconds: 300);
 
-  bool get _einkEnabled {
-    final routeContext = navigator?.context;
-    return routeContext != null && einkEnabled(routeContext, listen: false);
+  @override
+  Simulation? createSimulation({required bool forward}) {
+    if (!_usesIosMotion ||
+        _reduceMotion ||
+        fullscreenDialog ||
+        popGestureInProgress ||
+        (forward && (!animateEntrance || isFirst))) {
+      return null;
+    }
+    final start = animation!.value;
+    final end = forward ? 1.0 : 0.0;
+    // The iOS recording's incoming edge follows a critically damped spring
+    // with an immediate start. The recorded return settles more quickly.
+    final spring =
+        forward
+            ? const SpringDescription(mass: 1, stiffness: 441, damping: 42)
+            : const SpringDescription(mass: 1, stiffness: 1600, damping: 80);
+    return SpringSimulation(
+      spring,
+      start,
+      end,
+      (end - start) * (forward ? 9 : 0),
+      tolerance: const Tolerance(distance: .001, velocity: .02),
+      snapToEnd: true,
+    );
   }
 
   @override
@@ -88,15 +146,13 @@ class HorizontalCoverPageRoute<T> extends MaterialPageRoute<T> {
     Animation<double> animation,
     Animation<double> secondaryAnimation,
     Widget child,
-  ) {
-    // A preference change during a running transition presents its final frame
-    // immediately. Its controller remains alive so push/pop futures can finish.
-    if (einkEnabled(context)) return child;
-    return (Theme.of(context).platform == TargetPlatform.iOS
-            ? const CupertinoPageTransitionsBuilder()
-            : const HorizontalCoverPageTransitionsBuilder())
-        .buildTransitions(this, context, animation, secondaryAnimation, child);
-  }
+  ) => (Theme.of(context).platform == TargetPlatform.iOS
+          ? LiteTaleCupertinoTransitionsBuilder(
+            useLinearProgress: !fullscreenDialog,
+            cachePageDuringTransition: cachePageDuringTransition,
+          )
+          : const HorizontalCoverPageTransitionsBuilder())
+      .buildTransitions(this, context, animation, secondaryAnimation, child);
 }
 
 class _HorizontalCoverTransition extends StatefulWidget {

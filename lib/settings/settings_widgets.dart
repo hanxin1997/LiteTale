@@ -1,12 +1,186 @@
 import 'package:wild/eink/eink_overlays.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:wild/theme/horizontal_page_transitions.dart';
+import 'package:wild/theme/ios_glass_theme.dart';
 import 'package:wild/settings/app_logs.dart';
 import 'package:wild/theme/material_you.dart';
 
-/// Connected, opaque Android tiles. iOS keeps its existing glass grouping.
+AppBar settingsAppBar(
+  BuildContext context,
+  String title, {
+  List<Widget>? actions,
+}) {
+  if (!usesAppleGlass) return AppBar(title: Text(title), actions: actions);
+  final colors = Theme.of(context).colorScheme;
+  return AppBar(
+    toolbarHeight: 48,
+    leadingWidth: 60,
+    leading:
+        ModalRoute.of(context)?.impliesAppBarDismissal == true
+            ? Padding(
+              padding: const EdgeInsetsDirectional.only(start: 16),
+              child: Center(
+                child: SizedBox.square(
+                  dimension: 44,
+                  child: BackButton(
+                    style: IconButton.styleFrom(
+                      foregroundColor: colors.onSurface,
+                      backgroundColor: colors.surface,
+                      shape: const CircleBorder(),
+                    ),
+                  ),
+                ),
+              ),
+            )
+            : null,
+    title: Text(
+      title,
+      style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+    ),
+    actions: actions,
+  );
+}
+
+class SettingsCard extends StatelessWidget {
+  const SettingsCard({
+    super.key,
+    required this.child,
+    this.color,
+    this.margin,
+    this.filled = false,
+  });
+
+  final Widget child;
+  final Color? color;
+  final EdgeInsetsGeometry? margin;
+  final bool filled;
+
+  @override
+  Widget build(BuildContext context) {
+    if (usesAppleGlass) {
+      return Card(
+        color: color,
+        margin: margin,
+        shape: iosGroupedCardShape,
+        clipBehavior: Clip.antiAlias,
+        child: child,
+      );
+    }
+    return filled
+        ? Card.filled(color: color, margin: margin, child: child)
+        : Card(color: color, margin: margin, child: child);
+  }
+}
+
+class IosSettingsSection extends StatelessWidget {
+  const IosSettingsSection({
+    super.key,
+    required this.title,
+    required this.rows,
+  });
+
+  final String title;
+  final List<Widget> rows;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Padding(
+      padding: const EdgeInsets.only(top: 14),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Padding(
+            padding: const EdgeInsetsDirectional.fromSTEB(16, 10, 16, 10),
+            child: Semantics(
+              header: true,
+              child: Text(
+                title,
+                style: theme.textTheme.titleSmall?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          ),
+          Material(
+            color: theme.colorScheme.surface,
+            shape: iosGroupedCardShape,
+            clipBehavior: Clip.antiAlias,
+            child: Column(
+              children: [
+                for (var index = 0; index < rows.length; index++) ...[
+                  if (index > 0)
+                    Padding(
+                      padding: const EdgeInsetsDirectional.only(start: 56),
+                      child: Divider(
+                        height: 1,
+                        thickness: 0,
+                        color: theme.dividerColor,
+                      ),
+                    ),
+                  rows[index],
+                ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class IosSettingsRow extends StatelessWidget {
+  const IosSettingsRow({
+    super.key,
+    required this.icon,
+    required this.title,
+    this.description,
+    this.trailing = const CupertinoListTileChevron(),
+    this.onTap,
+  });
+
+  final IconData icon;
+  final String title;
+  final String? description;
+  final Widget? trailing;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return CupertinoListTile.notched(
+      padding: const EdgeInsetsDirectional.fromSTEB(16, 14, 16, 14),
+      leadingSize: 24,
+      leadingToTitle: 16,
+      leading: Icon(icon, size: 24, color: theme.colorScheme.primary),
+      title: Text(
+        title,
+        maxLines: 2,
+        style: theme.textTheme.titleMedium?.copyWith(
+          fontSize: 17,
+          fontWeight: FontWeight.w400,
+        ),
+      ),
+      subtitle:
+          description == null
+              ? null
+              : Text(
+                description!,
+                maxLines: 4,
+                style: theme.textTheme.bodyMedium?.copyWith(
+                  color: theme.colorScheme.onSurfaceVariant,
+                ),
+              ),
+      trailing: trailing,
+      onTap: onTap,
+    );
+  }
+}
+
+/// Connected Material You tiles for the display settings page.
 class SettingsTileGroup extends StatelessWidget {
   const SettingsTileGroup({super.key, required this.children});
   final List<Widget> children;
@@ -20,11 +194,13 @@ class SettingsTileGroup extends StatelessWidget {
         if (usesMaterialYou)
           ClipRRect(
             borderRadius: BorderRadius.vertical(
-              top: Radius.circular(i == 0 ? 24 : 6),
-              bottom: Radius.circular(i == children.length - 1 ? 24 : 6),
+              top: Radius.circular(i == 0 ? materialCardRadius : 6),
+              bottom: Radius.circular(
+                i == children.length - 1 ? materialCardRadius : 6,
+              ),
             ),
             child: Material(
-              color: Theme.of(context).colorScheme.surfaceContainerHigh,
+              color: materialRaisedSurface(Theme.of(context).colorScheme),
               child: children[i],
             ),
           )
@@ -49,8 +225,13 @@ Color settingsSurfaceLayer(ColorScheme colors, Color role, double contrast) {
 
 // Layout and grouping follow LightNovelReader 1.1.0 (Apache-2.0).
 // See docs/LNR_SETTINGS_REFERENCE_REVIEW.md for the pinned reference.
-void openSettingsPage(BuildContext context, Widget page) =>
-    Navigator.push(context, HorizontalCoverPageRoute(builder: (_) => page));
+void openSettingsPage(BuildContext context, Widget page) => Navigator.push(
+  context,
+  HorizontalCoverPageRoute(
+    builder: (_) => page,
+    cachePageDuringTransition: true,
+  ),
+);
 
 Future<void> settingsAction(
   BuildContext context,
@@ -283,18 +464,21 @@ Future<T?> chooseSetting<T>(
         contentPadding: const EdgeInsets.symmetric(vertical: 16),
         content: SizedBox(
           width: 360,
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                for (final entry in options.entries)
-                  AppRadioListTile<T>(
-                    title: Text(entry.value),
-                    value: entry.key,
-                    groupValue: selected,
-                    onChanged: (v) => Navigator.pop(context, v),
-                  ),
-              ],
+          child: Material(
+            type: MaterialType.transparency,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  for (final entry in options.entries)
+                    AppRadioListTile<T>(
+                      title: Text(entry.value),
+                      value: entry.key,
+                      groupValue: selected,
+                      onChanged: (v) => Navigator.pop(context, v),
+                    ),
+                ],
+              ),
             ),
           ),
         ),

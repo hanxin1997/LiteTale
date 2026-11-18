@@ -9,6 +9,7 @@ import 'package:wild/cubits/reader_curl_cubit.dart';
 import 'package:wild/eink/eink_preferences.dart';
 import 'package:wild/eink/eink_reader_view.dart';
 import 'package:wild/pages/home_page.dart';
+import 'package:wild/pages/novel/html_reader_page.dart';
 import 'package:wild/pages/novel/reader_cubit.dart';
 import 'package:wild/pages/novel/reader_page.dart';
 import 'package:wild/pages/novel/reader_type_cubit.dart';
@@ -88,13 +89,13 @@ void main() {
       await statistics.reload();
       await eink.setEnabled(oldEink);
       await type.updateType(oldType);
-      await curl.setEnabled(oldCurl);
+      await curl.setEffect(oldCurl);
       await api.deleteHistoryByNovelId(novelId: fixture.book.aid);
     });
 
     await eink.setEnabled(false);
     await type.updateType(ReaderType.html);
-    await curl.setEnabled(true);
+    await curl.setEffect(ReaderPageEffect.nativeCurl);
     navigator.push(HorizontalCoverPageRoute<void>(
       builder: (_) => const SettingsPage(),
     ));
@@ -108,7 +109,7 @@ void main() {
     await until(() => eink.state, '开关保存并生效');
     await tester.pumpAndSettle();
     expect(type.state, ReaderType.html);
-    expect(curl.state, isTrue);
+    expect(curl.state, ReaderPageEffect.nativeCurl);
     final restored = EInkPreferencesCubit();
     await restored.initialize();
     expect(restored.state, isTrue);
@@ -134,13 +135,14 @@ void main() {
     navigator.pop();
     await tester.pumpAndSettle();
     final detail = await fixture.detail(fixture.book.aid);
-    navigator.pushNamed('/novel/reader', arguments: {
+    final readerArguments = <String, dynamic>{
       'novelId': fixture.book.aid,
       'chapterId': detail.volumes.first.chapters.first.cid,
       'title': detail.info.title,
       'novelInfo': detail.info,
       'volumes': detail.volumes,
-    });
+    };
+    navigator.pushNamed('/novel/reader', arguments: readerArguments);
     await until(() => find.byType(EInkReaderView).evaluate().isNotEmpty, '静态分页正文');
     final reader = tester.element(find.byType(EInkReaderView)).read<ReaderCubit>();
     final before = reader.state as ReaderLoaded;
@@ -164,7 +166,17 @@ void main() {
     await eink.setEnabled(false);
     await tester.pumpAndSettle();
     expect(type.state, ReaderType.html);
-    expect(curl.state, isTrue);
+    expect(curl.state, ReaderPageEffect.nativeCurl);
+
+    // Reopen the same chapter through the production route to verify that the
+    // saved scrolling preference takes effect once the display override is off.
+    navigator.pushNamed('/novel/reader', arguments: readerArguments);
+    await until(
+      () => find.byType(HtmlReaderPage).evaluate().isNotEmpty,
+      '关闭墨水屏后同一章恢复连续滚动',
+    );
+    expect(find.byType(EInkReaderView), findsNothing);
+    expect(find.byType(ReaderPage), findsNothing);
     expect(tester.takeException(), isNull);
   }, skip: !Platform.isAndroid);
 }

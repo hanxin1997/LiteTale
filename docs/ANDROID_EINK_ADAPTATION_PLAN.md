@@ -1,6 +1,6 @@
 # Android 墨水屏适配方案（小米电纸书 Note）
 
-日期：2026-11-05。状态：业务代码和测试用例已编写，已有环境下的浏览器检查通过；Flutter 编译/测试、APK 构建和真机验收待具备相应环境后进行。
+日期：2026-11-05。状态：业务和测试已提交；后续通过 GitHub Actions 完成 Flutter 测试与 Android APK 构建发布。小米电纸书 Note 真机验收仍待进行。
 
 ## 1. 目标与当前工作区
 
@@ -220,3 +220,7 @@ Android 显示设置中的开关
 - 已尝试 `flutter test test/eink_preferences_test.dart test/eink_display_test.dart`，系统返回找不到 `flutter`；未执行任何 Flutter 测试用例。新增 Dart 测试不得描述为通过。
 - 后续应先执行 `flutter analyze`，再运行 5 个 `test/eink_*_test.dart`、本节上方列出的旧测试以及 `test/theme_reveal_host_test.dart`、`test/data_snapshot_test.dart`。之后通过既有 `tools/build_android.ps1` 构建，并执行 Android 设备测试；本轮未安装 APK。
 - 尚未声称小米电纸书 Note 的全刷、局刷、A2/GC16 波形或残影表现通过；需要有设备和系统版本后按第 8 节用例验收。
+
+### 后续云端验证补充（2026-11-05）
+
+用户授权自动发布后，代码推送至 `hanxin1997/LiteTale` 的 `main`，最终代码提交 `05aadb1`。Actions run `42039918750` 完成 Dart 分析（无错误，保留35项非阻断提示）、915 项 Flutter 测试通过/13 项跳过、11 项 APK 校验工具测试通过。ARM64 与 x86_64 正式APK均构建、签名、ZIP/ABI/16KB校验通过，发布版本 `v1.1.1+android.100003`。本节更新了上方此前“本机无法执行”的验证限制，未安装本机环境，也未进行 Note 真机测试。

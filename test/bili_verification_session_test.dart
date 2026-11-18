@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:wild/services/bili_browser.dart';
+import 'package:wild/services/read_request.dart';
 import 'package:wild/sources/book_source.dart';
 import 'package:wild/utils/bili_site_dom.dart';
 
@@ -18,12 +19,16 @@ void main() {
     sourceRevision.value = originalRevision;
   });
 
-  BiliBrowserSession session(_Port port, {Duration? ttl}) {
+  BiliBrowserSession session(
+    _Port port, {
+    Duration? ttl,
+    Duration searchPageGrace = const Duration(seconds: 10),
+  }) {
     final result = BiliBrowserSession(
       operationTimeout: const Duration(seconds: 1),
-      startupGrace: Duration.zero,
       pollInterval: const Duration(milliseconds: 1),
       verificationGrace: const Duration(milliseconds: 5),
+      searchPageGrace: searchPageGrace,
       verifiedPageTtl: ttl ?? const Duration(minutes: 2),
     );
     result.attach(port, result.rendererGeneration);
@@ -422,6 +427,297 @@ void main() {
   );
 
   test(
+    'confirmed search results return to the matching query without resubmission',
+    () async {
+      final port = _Port();
+      final browser = session(port);
+      final entry = Uri.parse('https://www.bilinovel.net/search.html');
+      final request = BiliSiteVerificationRequired(
+        target: entry,
+        kind: BiliProbeKind.searchForm,
+        revision: sourceRevision.value,
+        searchEntry: entry,
+        searchKeyword: '新约魔禁',
+        searchPage: 1,
+      );
+      final result = {
+        'url': 'https://www.bilinovel.net/S6/',
+        'ready': true,
+        'books': [
+          {'nid': '25', 'title': '新约魔法禁书目录'},
+        ],
+      };
+      expect(
+        await browser.adoptVisiblePage(
+          request,
+          result,
+          persistSession: () async {},
+          isCurrent: () => true,
+        ),
+        isTrue,
+      );
+      expect((await browser.search('新约魔禁', 1)).records.single.aid, 'bili:25');
+      expect(port.submitted, isFalse);
+    },
+  );
+
+  test('a mobile result page must show the keyword being verified', () async {
+    final port = _Port();
+    final browser = session(port);
+    final entry = Uri.parse('https://www.bilinovel.net/search.html');
+    final request = BiliSiteVerificationRequired(
+      target: entry,
+      kind: BiliProbeKind.searchResults,
+      revision: sourceRevision.value,
+      searchEntry: entry,
+      searchKeyword: '魔法禁书',
+      searchPage: 1,
+    );
+    final result = <String, dynamic>{
+      'url': 'https://www.bilinovel.net/search/results',
+      'ready': true,
+      'resultKeyword': '魔法禁书',
+      'resultCount': 9,
+      'books': [
+        {'nid': '42', 'title': '创约 魔法禁书目录'},
+      ],
+    };
+    for (final wrongResult in [
+      {...result, 'resultKeyword': '新约'},
+      {...result}..remove('resultKeyword'),
+      {...result, 'books': []},
+    ]) {
+      await expectLater(
+        browser.adoptVisiblePage(
+          request,
+          wrongResult,
+          persistSession:
+              () async => fail('must not persist a mismatched page'),
+          isCurrent: () => true,
+        ),
+        throwsA(isA<BiliBrowserException>()),
+      );
+    }
+    expect(
+      await browser.adoptVisiblePage(
+        request,
+        result,
+        persistSession: () async {},
+        isCurrent: () => true,
+      ),
+      isTrue,
+    );
+    expect((await browser.search('魔法禁书', 1)).records.single.aid, 'bili:42');
+    expect(port.submitted, isFalse);
+  });
+
+  test('the next search reuses the verified browser session', () async {
+    final port = _Port();
+    final browser = session(port);
+    const firstQuery = '魔法禁书', secondQuery = '一周一次买下', thirdQuery = '海床';
+    final challengeUrl = Uri.parse(
+      'https://www.bilinovel.net/search-verification',
+    );
+    port.searchResult = {
+      'url': '$challengeUrl',
+      'ready': false,
+      'verificationRequired': true,
+      'searchChallenge': true,
+      'searchKeyword': firstQuery,
+      'error': '原站搜索需要验证码',
+    };
+    final request = await browser
+        .search(firstQuery, 1)
+        .then<BiliSiteVerificationRequired>(
+          (_) => throw StateError('Expected search verification'),
+          onError: (Object error) => error as BiliSiteVerificationRequired,
+        );
+    expect(request.target, challengeUrl);
+    expect(request.searchKeyword, firstQuery);
+    expect(port.urls, ['https://www.bilinovel.net/search.html']);
+    expect(browser.showHeldSearch(request, port), isTrue);
+    expect(browser.showHeldSearch(request, port), isFalse);
+    expect(browser.showingSearchChallenge, isTrue);
+    final visible = {
+      'url': 'https://www.bilinovel.net/search.html',
+      'ready': true,
+      'resultKeyword': firstQuery,
+      'resultCount': 9,
+      'next': 'https://www.bilinovel.net/search.html?page=1#results',
+      'books': [
+        {'nid': '25', 'title': '创约 魔法禁书目录'},
+      ],
+    };
+    expect(
+      await browser.adoptVisiblePage(
+        request,
+        visible,
+        persistSession: () async {},
+        isCurrent: () => true,
+      ),
+      isTrue,
+    );
+    final generation = browser.rendererGeneration;
+    browser.releaseHeldSearch(request, verified: true);
+    expect(browser.showingSearchChallenge, isFalse);
+    expect(browser.rendererGeneration, generation);
+    final verified = await browser.search(firstQuery, 1);
+    expect(verified.records.single.aid, 'bili:25');
+    expect(verified.maxPage, 1);
+    expect(port.urls, ['https://www.bilinovel.net/search.html']);
+
+    // The old result remains briefly visible at the very same URL in WebKit.
+    port.formResponses.add({...visible, 'retiredSearchPage': true});
+    port.searchResponses.add(port.searchResult!);
+    port.searchResult = {
+      'url': 'https://www.bilinovel.net/search.html',
+      'ready': true,
+      'resultKeyword': secondQuery,
+      'resultCount': 1,
+      'books': [
+        {'nid': '42', 'title': secondQuery},
+      ],
+    };
+    final second = await browser.search(secondQuery, 1);
+    expect(second.records.single.aid, 'bili:42');
+    expect(browser.rendererGeneration, generation);
+    expect(port.retiredSearchPages, 1);
+    expect(port.urls, [
+      'https://www.bilinovel.net/search.html',
+      'https://www.bilinovel.net/search.html',
+      'about:blank',
+    ]);
+
+    port.searchResult = {
+      'url': 'https://www.bilinovel.net/search.html',
+      'ready': false,
+      'verificationRequired': true,
+      'searchChallenge': true,
+      'searchKeyword': thirdQuery,
+      'error': '原站搜索需要验证码',
+    };
+    final next = await browser
+        .search(thirdQuery, 1)
+        .then<BiliSiteVerificationRequired>(
+          (_) => fail('expected a fresh search challenge'),
+          onError: (Object error) => error as BiliSiteVerificationRequired,
+        );
+    expect(next.searchKeyword, thirdQuery);
+    expect(next.searchChallenge, isTrue);
+    expect(next, isNot(same(request)));
+    expect(next.searchEntry, request.searchEntry);
+    expect(browser.rendererGeneration, generation);
+    expect(browser.showHeldSearch(next, port), isTrue);
+    await expectLater(
+      browser.adoptVisiblePage(
+        next,
+        {...visible, 'url': '${next.target}'},
+        persistSession: () async => fail('the challenge is not a result'),
+        isCurrent: () => true,
+      ),
+      throwsA(isA<BiliBrowserException>()),
+    );
+    browser.releaseHeldSearch(next);
+    expect(browser.showingSearchChallenge, isFalse);
+    expect(browser.rendererGeneration, generation + 1);
+  });
+
+  test('the original search opens while its form is still loading', () async {
+    const entry = 'https://www.bilinovel.net/search.html';
+    final port = _Port()..formResponses.add({'url': entry, 'ready': false});
+    final browser = session(port);
+    final owner = BiliSearchRequest()..openOriginalPage = true;
+    final request = await ReadRequest.run(
+      owner,
+      () => browser.search('魔法禁书', 1),
+    ).then<BiliSiteVerificationRequired>(
+      (_) => fail('expected the loading site form'),
+      onError: (Object error) => error as BiliSiteVerificationRequired,
+    );
+    expect(request.manualSearch, isTrue);
+    expect(request.kind, BiliProbeKind.searchForm);
+    expect(port.submitted, isFalse);
+    expect(port.urls, [entry]);
+    expect(browser.showHeldSearch(request, port), isTrue);
+    browser.releaseHeldSearch(request);
+  });
+
+  test(
+    'the in-app action takes the current search before the background deadline',
+    () async {
+      const entry = 'https://www.bilinovel.net/search.html';
+      const query = '魔法禁书';
+      final probeStarted = Completer<void>();
+      final port =
+          _Port()
+            ..firstSearchProbe = probeStarted
+            ..searchResult = {'url': entry, 'ready': false};
+      final browser = session(port);
+      final owner = BiliSearchRequest();
+      final handoff = ReadRequest.run(
+        owner,
+        () => browser.search(query, 1),
+      ).then<BiliSiteVerificationRequired>(
+        (_) => fail('expected the running search page'),
+        onError: (Object error) => error as BiliSiteVerificationRequired,
+      );
+      await probeStarted.future;
+      expect(port.submitted, isTrue);
+      owner.openOriginalPage = true;
+      final request = await handoff;
+      expect(request.manualSearch, isTrue);
+      expect(request.searchKeyword, query);
+      expect(port.urls, [entry]);
+      expect(browser.showHeldSearch(request, port), isTrue);
+
+      expect(
+        await browser.adoptVisiblePage(
+          request,
+          {
+            'url': entry,
+            'ready': true,
+            'resultKeyword': query,
+            'resultCount': 1,
+            'books': [
+              {'nid': '42', 'title': '创约 魔法禁书目录'},
+            ],
+          },
+          persistSession: () async {},
+          isCurrent: () => true,
+        ),
+        isTrue,
+      );
+      browser.releaseHeldSearch(request, verified: true);
+      expect((await browser.search(query, 1)).records.single.aid, 'bili:42');
+      expect(port.urls, [entry]);
+    },
+  );
+
+  test(
+    'a stalled site search can be finished in the same visible page',
+    () async {
+      const entry = 'https://www.bilinovel.net/search.html';
+      final port = _Port()..searchResult = {'url': entry, 'ready': false};
+      final browser = session(
+        port,
+        searchPageGrace: const Duration(milliseconds: 15),
+      );
+      final request = await browser
+          .search('一周一次买下', 1)
+          .then<BiliSiteVerificationRequired>(
+            (_) => fail('expected to open the ongoing search'),
+            onError: (Object error) => error as BiliSiteVerificationRequired,
+          );
+      expect(request.manualSearch, isTrue);
+      expect(request.searchChallenge, isFalse);
+      expect(request.searchKeyword, '一周一次买下');
+      expect(port.urls, [entry]);
+      expect(browser.showHeldSearch(request, port), isTrue);
+      browser.releaseHeldSearch(request);
+    },
+  );
+
+  test(
     'visible navigation permits same-origin challenge paths, not other origins',
     () {
       final r = request();
@@ -448,9 +744,13 @@ class _Port implements BiliBrowserPort {
   String current = 'about:blank';
   final urls = <String>[];
   final responses = <Map<String, dynamic>>[];
-  int chapterProbes = 0, documentProbes = 0;
+  int chapterProbes = 0, documentProbes = 0, retiredSearchPages = 0;
   bool pending = false, submitted = false;
   bool denied = false, incomplete = false;
+  Map<String, dynamic>? searchResult;
+  Completer<void>? firstSearchProbe;
+  final searchResponses = <Map<String, dynamic>>[];
+  final formResponses = <Map<String, dynamic>>[];
   @override
   Future<void> loadUrl(String url) async {
     current = url;
@@ -461,8 +761,19 @@ class _Port implements BiliBrowserPort {
   Future<void> setDesktopSite(bool enabled) async {}
   @override
   Future<dynamic> executeScript(String script) async {
-    if (script == biliHomeReadyScript) return {'url': current, 'ready': true};
+    if (script == biliRetireSearchPageScript) {
+      retiredSearchPages++;
+      return true;
+    }
+    if (script == biliHomeReadyScript) {
+      if (formResponses.isNotEmpty) return formResponses.removeAt(0);
+      return {'url': current, 'ready': true};
+    }
     if (script == biliSearchProbeScript) {
+      firstSearchProbe?.complete();
+      firstSearchProbe = null;
+      if (searchResponses.isNotEmpty) return searchResponses.removeAt(0);
+      if (searchResult case final result?) return result;
       return {
         'url': current,
         'ready': true,
@@ -499,7 +810,7 @@ class _Port implements BiliBrowserPort {
       };
     }
     submitted = true;
-    current = 'https://www.linovelib.com/novel/2844.html';
+    current = '${Uri.parse(current).origin}/novel/2844.html';
     return true;
   }
 }

@@ -1,24 +1,83 @@
 import 'dart:convert';
 
+const biliRetireSearchPageScript = r'''(() => {
+  window.__liteTaleRetiredSearchPage = true;
+  return true;
+})()''';
+
+const _biliFindSearchField = r'''
+  function biliFindSearchField() {
+    if (document.readyState === 'loading' || window.__liteTaleRetiredSearchPage) return null;
+    const field = document.querySelector('#searchkey[name="searchkey"]');
+    const form = field && field.form;
+    if (!form || field.disabled || !['post','get'].includes(form.method.toLowerCase()) ||
+        form.querySelector('input[type="password"]')) return null;
+    const action = new URL(form.action, location.href);
+    if (action.origin !== location.origin || action.username || action.password ||
+        action.hash || !['/S6/','/search.html'].includes(action.pathname)) return null;
+    return field;
+  }
+''';
+
 String biliSubmitSearchScript(String keyword) => '''(() => {
-  const field = document.querySelector('#searchkey[name="searchkey"]');
-  const form = field && field.form;
-  if (!form || form.method.toLowerCase() !== 'post' ||
-      new URL(form.action, location.href).origin !== location.origin ||
-      !['/S6/','/search.html'].includes(new URL(form.action, location.href).pathname)) return false;
+  $_biliFindSearchField
+  const field = biliFindSearchField();
+  if (!field || window.__liteTaleBiliSearchPending) return false;
+  const form = field.form;
+  const submit = form.querySelector('[type="submit"]');
+  if (!form.requestSubmit && !submit) return false;
   field.value = ${jsonEncode(keyword)};
   field.dispatchEvent(new Event('input', {bubbles:true}));
-  // A POST may stay on /search.html. Ignore the previous document's suggested
+  // A form submission may stay on /search.html. Ignore the previous document's suggested
   // books until real navigation replaces this window and its pending marker.
   window.__liteTaleBiliSearchPending = true;
   if (form.requestSubmit) form.requestSubmit();
-  else {
-    const button = form.querySelector('[type="submit"]');
-    if (!button) return false;
-    button.click();
-  }
+  else submit.click();
   return true;
 })()''';
+
+String biliFillSearchFieldScript(String keyword) => '''(() => {
+  const field = document.querySelector('#searchkey[name="searchkey"]');
+  if (!field || field.value.trim()) return false;
+  field.value = ${jsonEncode(keyword)};
+  field.dispatchEvent(new Event('input', {bubbles:true}));
+  return true;
+})()''';
+
+const _biliSearchVerificationGuard = r'''
+  function biliCheckSearchVerification(out) {
+    const searchPath = ['/S6/','/search.html','/'].includes(location.pathname);
+    const visible = node => node.getClientRects().length > 0 &&
+      getComputedStyle(node).visibility === 'visible';
+    const form = [...document.forms].find(form => {
+      const action = new URL(form.action, location.href);
+      if (action.origin !== location.origin || form.querySelector('input[type="password"]')) return false;
+      const fields = [...form.querySelectorAll('input')].filter(input =>
+        !input.disabled && ['text','number','tel','search'].includes(input.type) && visible(input));
+      if (!fields.length) return false;
+      const images = [...form.querySelectorAll('img')].filter(visible);
+      if (!images.length) return false;
+      const namedCode = fields.some(input =>
+        /^(?:captcha|captcha_code|checkcode|verifycode|verify_code|seccode|search_code)$/i.test(input.name));
+      const codeImage = images.some(img => /captcha|checkcode|verifycode|seccode|验证码|驗證碼/i.test(
+        [img.getAttribute('src'), img.alt, img.id].join(' ')));
+      const verifySubmit = [...form.querySelectorAll('button,input[type="submit"]')].some(button =>
+        visible(button) &&
+        /^(?:验证并搜索|驗證並搜索|驗證並搜尋)$/.test(
+          (button.tagName === 'INPUT' ? button.value : button.textContent).trim()));
+      return verifySubmit ||
+        (searchPath && namedCode && (codeImage || !!form.querySelector('[name="searchkey"]')));
+    });
+    if (!form) return false;
+    out.ready=false;out.verificationRequired=true;out.searchChallenge=true;
+    const keyword = form.querySelector('input[name="searchkey"]');
+    if (keyword && keyword.value.trim() && keyword.value.length <= 200) {
+      out.searchKeyword = keyword.value.trim();
+    }
+    out.error='原站搜索需要验证码，请打开原站填写后继续';
+    return true;
+  }
+''';
 
 // Access state is identified in the site's error/challenge panels, never by
 // scanning a novel's prose or search result text.
@@ -52,9 +111,15 @@ const biliAccessProbeScript =
 const biliHomeReadyScript =
     r'''(() => {''' +
     _biliAccessGuard +
+    _biliSearchVerificationGuard +
+    _biliFindSearchField +
     r'''
-  const out={url:location.href,ready:!!document.querySelector('#searchkey[name="searchkey"]')};
-  if (biliCheckAccess(out)) return JSON.stringify(out);
+  const out={url:location.href,documentLoading:document.readyState==='loading',ready:false};
+  if (window.__liteTaleRetiredSearchPage) {
+    out.retiredSearchPage=true;return JSON.stringify(out);
+  }
+  if (biliCheckAccess(out) || biliCheckSearchVerification(out)) return JSON.stringify(out);
+  out.ready=!window.__liteTaleBiliSearchPending && !!biliFindSearchField();
   return JSON.stringify(out);
 })()''';
 
@@ -105,45 +170,96 @@ const biliDocumentProbeScript =
 const biliSearchProbeScript =
     r'''(() => {''' +
     _biliAccessGuard +
+    _biliSearchVerificationGuard +
     r'''
-  const result = {url:location.href, ready:false, books:[], next:null};
-  const body = document.body ? document.body.innerText : '';
-  if (biliCheckAccess(result)) return JSON.stringify(result);
-  if (window.__liteTaleBiliSearchPending) return JSON.stringify(result);
-  if (document.readyState === 'loading' || location.pathname === '/' || !document.body) return JSON.stringify(result);
-  const image = root => {
-    const img = root.querySelector('img');
-    return img && (img.getAttribute('data-original') || img.getAttribute('data-src') || img.getAttribute('src')) || '';
+  const result = {url:location.href, documentLoading:document.readyState==='loading', ready:false, books:[], next:null};
+  if (window.__liteTaleRetiredSearchPage) {
+    result.retiredSearchPage=true;return JSON.stringify(result);
+  }
+  if (biliCheckAccess(result) || biliCheckSearchVerification(result)) return JSON.stringify(result);
+  if (location.pathname === '/' || !document.body) return JSON.stringify(result);
+  const path = location.pathname;
+  const searchPath = ['/S6/','/search.html'].includes(path);
+  const detail = path.match(/^\/novel\/([1-9]\d*)\.html$/);
+  const body = document.body.innerText;
+  const heading = body.slice(0, 8192);
+  const summary = !detail && heading.match(/^[^\S\r\n]*([^\r\n]{1,200}?)\s*(?:相关共有|相關共有)\s*(\d{1,7})\s*(?:条记录|條記錄)/m);
+  if (summary) {
+    result.resultKeyword = summary[1].trim();
+    result.resultCount = Number(summary[2]);
+  } else if (result.documentLoading || window.__liteTaleBiliSearchPending) {
+    return JSON.stringify(result);
+  }
+  const images = root => {
+    const img = root && (root.matches('img') ? root : root.querySelector('img'));
+    return img ? ['data-src','data-original','src'].map(k => img.getAttribute(k)).filter(Boolean) : [];
   };
-  const detail = location.pathname.match(/^\/novel\/([1-9]\d*)\.html$/);
   const title = document.querySelector('h1.book-name,h1.book-title');
   if (detail && title) {
-    result.books = [{nid:detail[1],title:title.innerText.trim(),image:
-      (document.querySelector('meta[property="og:image"]')||{}).content ||
-      ((document.querySelector('img.book-cover')||{}).src) ||
-      image(document.querySelector('.book-img,.book-cover,.book-info')||document)}];
+    result.books = [{nid:detail[1],title:title.innerText.trim(),images:[
+      ...images(document.querySelector('img.book-cover')),
+      (document.querySelector('meta[property="og:image"]')||{}).content || '',
+      ...images(document.querySelector('.book-img,.book-cover,.book-info'))
+    ]}];
     result.ready = true; return JSON.stringify(result);
   }
-  if (!['/S6/','/search.html'].includes(location.pathname)) return JSON.stringify(result);
+  if (!searchPath && !(summary && /搜索结果|搜索結果|搜尋結果/.test(document.title + heading))) return JSON.stringify(result);
+  if (!summary && /搜索间隔|搜索频繁|请.*秒后.*搜索/.test(body)) {
+    result.error='原站暂时限制搜索频率，请稍后重试';return JSON.stringify(result);
+  }
+  const empty = summary
+    ? result.resultCount === 0
+    : /没有找到|未找到|无搜索结果|没有相关|查无|未搜索到|没有搜到/.test(body);
+  const lists = '.search-list,.search-result,.bookbox,.rank_d_list,table.grid,.book-list,#searchResult,#list_content';
+  const scopes = [...document.querySelectorAll(lists)];
+  // The mobile search form and its suggestions are also at /search.html.
+  if (path === '/search.html' && !summary &&
+      document.querySelector('#searchkey[name="searchkey"]') &&
+      !scopes.length && !empty) return JSON.stringify(result);
+  if (summary && empty) {
+    result.ready = true;
+    return JSON.stringify(result);
+  }
   const seen = new Set();
-  const scopes = [...document.querySelectorAll('.search-list,.search-result,.bookbox,.rank_d_list,table.grid,.book-list,#searchResult,#list_content')];
+  if (summary) {
+    scopes.push(...document.querySelectorAll('.book-li,.book-item,.module-search-item'));
+  }
   for (const root of (scopes.length ? scopes : [document.body])) {
-    if (!root) continue;
     for (const a of root.querySelectorAll('a[href]')) {
       const url = new URL(a.getAttribute('href'),location.href);
       const m = url.origin === location.origin && url.pathname.match(/^\/novel\/([1-9]\d*)\.html$/);
-      const card=a.closest('.bookbox,.rank_d_list,tr,li')||a;
-      const text = (card.querySelector('h4.book-title,.rank_d_b_name')||a).innerText.trim();
-      if (!m || !text || seen.has(m[1])) continue;
-      seen.add(m[1]); result.books.push({nid:m[1],title:text,image:image(card)});
+      if (!m || seen.has(m[1]) || a.closest('#searchHotHistory,#searchPopularWords')) continue;
+      const card = a.closest('.bookbox,.rank_d_list,.book-li,.book-item,.module-search-item,tr,li') || a;
+      const title = card.querySelector('.book-title,.rank_d_b_name,h3,h4') || a;
+      const text = title.innerText.replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      seen.add(m[1]); result.books.push({nid:m[1],title:text,images:images(card)});
       if (result.books.length >= 100) break;
     }
+    if (result.books.length >= 100) break;
   }
-  const next = [...document.querySelectorAll('a[href]')].find(a =>
-    a.rel === 'next' || /^(下一页|下页|下一頁|›|»)$/.test(a.innerText.trim()));
-  if (next) result.next = new URL(next.getAttribute('href'),location.href).href;
-  if (/搜索间隔|搜索频繁|请.*秒后.*搜索/.test(body)) result.error='原站暂时限制搜索频率，请稍后重试';
-  result.ready = result.books.length > 0 || /没有找到|未找到|无搜索结果|没有相关|查无|未搜索到|没有搜到/.test(body);
+  // The exact count confirms a complete result even with trailing scripts
+  // pending. A partially streamed or paginated list still waits for parsing.
+  if (result.documentLoading && result.books.length !== result.resultCount) return JSON.stringify(result);
+  const currentParams = new URL(location.href).searchParams;
+  const page = Number(currentParams.get('page') || '1');
+  const keyword = result.resultKeyword || currentParams.get('searchkey');
+  const next = [...document.querySelectorAll('a[href]')].find(a => {
+    if (a.rel !== 'next' && !/^(下一页|下页|下一頁|›|»)$/.test(a.innerText.trim())) return false;
+    if (a.getAttribute('aria-disabled') === 'true' || a.closest('.disabled')) return false;
+    try {
+      const url = new URL(a.getAttribute('href'), location.href);
+      const nextKeyword = url.searchParams.get('searchkey');
+      return url.origin === location.origin && !url.hash &&
+        ['/S6/','/search.html'].includes(url.pathname) &&
+        url.searchParams.get('page') === String(page + 1) &&
+        (!keyword || nextKeyword === null || nextKeyword === keyword);
+    } catch (_) {
+      return false;
+    }
+  });
+  if (next) result.next = new URL(next.getAttribute('href'), location.href).href;
+  result.ready = result.books.length > 0 || empty;
   return JSON.stringify(result);
 })()''';
 

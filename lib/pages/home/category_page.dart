@@ -11,6 +11,8 @@ import 'package:wild/src/rust/wenku8/models.dart';
 import 'package:wild/widgets/novel_cover_card.dart';
 import 'package:wild/widgets/source_website.dart';
 import 'package:wild/theme/material_you.dart';
+import 'package:wild/theme/ios_dock_insets.dart';
+import 'package:wild/utils/wenku8_network_error.dart';
 
 class CategoryPage extends StatefulWidget {
   final String? initialTag;
@@ -48,6 +50,7 @@ class _CategoryPageState extends State<CategoryPage> {
   int _tagRequest = 0;
   int _pageRequest = 0;
   int _choiceRevision = 0;
+  bool _preferencesLoaded = false;
   Future<void> _preferenceWrites = Future.value();
   static const _keyTag = 'category_page_selected_tag';
   static const _keyViewMode = 'category_page_view_mode';
@@ -83,8 +86,10 @@ class _CategoryPageState extends State<CategoryPage> {
       /* Preferences must not prevent a supplied tag loading. */
     }
     if (!mounted || choice != _choiceRevision) return;
+    _preferencesLoaded = true;
     setState(() {
       _selectedTag ??= savedTag.isEmpty ? null : savedTag;
+      _selectedTag ??= _tagGroups?.expand((group) => group.tags).firstOrNull;
       if (const {'0', '1', '2', '3'}.contains(savedMode)) _viewMode = savedMode;
     });
     if (_selectedTag case final tag?) await _loadTagPage(tag, refresh: true);
@@ -115,7 +120,20 @@ class _CategoryPageState extends State<CategoryPage> {
       );
       if (!mounted || request != _tagRequest) return;
       if (groups.isEmpty) throw const FormatException('文库8分类列表为空，请重试。');
-      setState(() => _tagGroups = groups);
+      setState(() {
+        _tagGroups = groups;
+        if (_preferencesLoaded) {
+          _selectedTag ??= groups.expand((group) => group.tags).firstOrNull;
+        }
+      });
+      if (_preferencesLoaded &&
+          _currentPage == null &&
+          !_isLoading &&
+          _pageError == null) {
+        if (_selectedTag case final tag?) {
+          await _loadTagPage(tag, refresh: true);
+        }
+      }
     } catch (error) {
       if (mounted && request == _tagRequest) setState(() => _tagError = error);
     }
@@ -168,6 +186,7 @@ class _CategoryPageState extends State<CategoryPage> {
 
   void _changeSelection({String? tag, String? mode}) {
     _choiceRevision++;
+    _preferencesLoaded = true;
     setState(() {
       _selectedTag = tag ?? _selectedTag;
       _viewMode = mode ?? _viewMode;
@@ -180,6 +199,7 @@ class _CategoryPageState extends State<CategoryPage> {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     return Column(
       children: [
         // Top bar with view mode and category selector
@@ -259,13 +279,7 @@ class _CategoryPageState extends State<CategoryPage> {
                               decoration: BoxDecoration(
                                 color:
                                     usesMaterialYou
-                                        ? materialSurface(
-                                          Theme.of(context).colorScheme,
-                                          Theme.of(
-                                            context,
-                                          ).colorScheme.surfaceContainerHigh,
-                                          .08,
-                                        )
+                                        ? colors.secondaryContainer
                                         : null,
                                 border:
                                     usesMaterialYou
@@ -274,7 +288,7 @@ class _CategoryPageState extends State<CategoryPage> {
                                           color: Theme.of(context).dividerColor,
                                         ),
                                 borderRadius: BorderRadius.circular(
-                                  usesMaterialYou ? 20 : 8,
+                                  usesMaterialYou ? 28 : 8,
                                 ),
                               ),
                               child: Row(
@@ -288,10 +302,10 @@ class _CategoryPageState extends State<CategoryPage> {
                                       overflow: TextOverflow.ellipsis,
                                       style: TextStyle(
                                         color:
-                                            _selectedTag != null
-                                                ? Theme.of(
-                                                  context,
-                                                ).colorScheme.primary
+                                            usesMaterialYou
+                                                ? colors.onSecondaryContainer
+                                                : _selectedTag != null
+                                                ? colors.primary
                                                 : null,
                                         fontWeight:
                                             _selectedTag != null
@@ -383,11 +397,23 @@ class _CategoryPageState extends State<CategoryPage> {
             ],
           ),
         ),
-        if (_tagError != null)
-          Wenku8RecoveryButton(
-            error: _tagError,
-            source: SourceId.wenku8,
-            onRecovered: _loadTags,
+        if (_tagError case final error?)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Column(
+              children: [
+                Text(
+                  wenku8ReadErrorMessage(error),
+                  textAlign: TextAlign.center,
+                ),
+                Wenku8RecoveryButton(
+                  error: error,
+                  source: SourceId.wenku8,
+                  siteVerificationOnly: true,
+                  onRecovered: _loadTags,
+                ),
+              ],
+            ),
           ),
         // Novel grid or error state
         Expanded(
@@ -407,10 +433,13 @@ class _CategoryPageState extends State<CategoryPage> {
                   ? RefreshIndicator(
                     onRefresh: () => _loadTagPage(_selectedTag!, refresh: true),
                     child: ListView(
-                      padding: const EdgeInsets.all(16),
+                      physics: const AlwaysScrollableScrollPhysics(),
+                      padding: IosDockInsets.scrollPadding(
+                        context,
+                        const EdgeInsets.all(16),
+                      ),
                       children: [
                         SizedBox(
-                          height: MediaQuery.of(context).size.height - 100,
                           child: Column(
                             mainAxisAlignment: MainAxisAlignment.start,
                             children: [
@@ -426,7 +455,7 @@ class _CategoryPageState extends State<CategoryPage> {
                               ),
                               const SizedBox(height: 8),
                               Text(
-                                _pageError.toString(),
+                                wenku8ReadErrorMessage(_pageError),
                                 style: Theme.of(context).textTheme.bodyMedium,
                                 textAlign: TextAlign.start,
                               ),
@@ -434,6 +463,7 @@ class _CategoryPageState extends State<CategoryPage> {
                               Wenku8RecoveryButton(
                                 error: _pageError,
                                 source: SourceId.wenku8,
+                                siteVerificationOnly: true,
                                 onRecovered:
                                     () => _loadTagPage(
                                       _selectedTag!,
@@ -459,6 +489,9 @@ class _CategoryPageState extends State<CategoryPage> {
                     source: SourceId.wenku8,
                     requestKey: _pageRequest,
                   )
+                  : _currentPage!.records.isEmpty &&
+                      _currentPage!.currentPage >= _currentPage!.maxPage
+                  ? const Center(child: Text('当前分类暂无书目'))
                   : NotificationListener<ScrollNotification>(
                     onNotification: (notification) {
                       if (notification is ScrollEndNotification &&
@@ -472,7 +505,10 @@ class _CategoryPageState extends State<CategoryPage> {
                       return true;
                     },
                     child: GridView.builder(
-                      padding: const EdgeInsets.all(8),
+                      padding: IosDockInsets.scrollPadding(
+                        context,
+                        const EdgeInsets.all(8),
+                      ),
                       gridDelegate: const BookGridDelegate(
                         childAspectRatio: 207 / 307,
                         crossAxisSpacing: 8,
@@ -496,6 +532,14 @@ class _CategoryPageState extends State<CategoryPage> {
                                   ),
                                   const SourceWebsiteLink(
                                     source: SourceId.wenku8,
+                                    showAddress: false,
+                                  ),
+                                  Wenku8RecoveryButton(
+                                    error: _pageError,
+                                    source: SourceId.wenku8,
+                                    siteVerificationOnly: true,
+                                    onRecovered:
+                                        () => _loadTagPage(_selectedTag!),
                                   ),
                                 ],
                               ),

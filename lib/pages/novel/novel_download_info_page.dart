@@ -6,13 +6,13 @@ import 'package:wild/widgets/app_loading_indicator.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:wild/sources/book_source.dart';
 import 'package:wild/sources/source_api.dart';
-import 'package:wild/widgets/cached_image.dart';
+import 'package:wild/widgets/book_cover_image.dart';
 import 'package:wild/pages/novel/novel_download_info_cubit.dart';
-import 'package:wild/pages/novel/reader_page.dart';
+import 'package:wild/pages/novel/reader_route.dart';
+import 'package:wild/services/reading_progress.dart';
 import 'package:wild/src/rust/wenku8/models.dart';
 import 'package:flutter_html/flutter_html.dart';
 import 'package:wild/theme/app_fonts.dart';
-import 'package:wild/theme/horizontal_page_transitions.dart';
 import 'package:wild/widgets/left_aligned_scrollable.dart';
 
 class NovelDownloadInfoPage extends StatelessWidget {
@@ -132,33 +132,41 @@ class _NovelDownloadInfoContent extends StatelessWidget {
       initialPage = currentState.readingHistory!.progressPage;
     }
 
-    await Navigator.push(
+    final cubit = context.read<NovelDownloadInfoCubit>();
+    var listened = false;
+    await pushNovelReader(
       context,
-      HorizontalCoverPageRoute(
-        builder:
-            (context) => ReaderPage(
-              aid: novelId,
-              cid: chapterId,
-              initialTitle: title,
-              volumes: volumes,
-              novelInfo: NovelInfo(
-                title: download.novelName,
-                author: download.author,
-                status: download.status,
-                imgUrl: download.coverUrl,
-                introduce: download.introduce,
-                finUpdate: download.finUpdate,
-                isAnimated: download.isAnimated,
-                tags: download.tags.split(','),
-                trending: download.trending,
-                heat: '',
-              ),
-              initialPage: initialPage,
-            ),
+      RouteSettings(
+        name: novelReaderRouteName,
+        arguments: {
+          'novelId': novelId,
+          'chapterId': chapterId,
+          'title': title,
+          'volumes': volumes,
+          'forcePaged': true,
+          'novelInfo': NovelInfo(
+            title: download.novelName,
+            author: download.author,
+            status: download.status,
+            imgUrl: download.coverUrl,
+            introduce: download.introduce,
+            finUpdate: download.finUpdate,
+            isAnimated: download.isAnimated,
+            tags: download.tags.split(','),
+            trending: download.trending,
+            heat: '',
+          ),
+          'initialPage': initialPage,
+          if (initialPage == scrollReaderProgressPage)
+            'initialTextOffset': currentState.readingHistory!.progress,
+        },
       ),
+      onListeningPosition: (progress) {
+        listened = true;
+        cubit.acceptListeningPosition(progress);
+      },
     );
-    // 返回后更新历史记录
-    context.read<NovelDownloadInfoCubit>().loadHistory();
+    if (context.mounted && !listened) await cubit.loadHistory();
   }
 
   @override
@@ -259,7 +267,7 @@ class _NovelHeader extends StatelessWidget {
         children: [
           ClipRRect(
             borderRadius: BorderRadius.circular(8),
-            child: CachedImage(
+            child: BookCoverImage(
               url: download.coverUrl,
               source: sourceOf(download.novelId),
               width: 120,

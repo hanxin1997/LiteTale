@@ -79,6 +79,16 @@ class EpubPageChannel(private val activity: Activity, messenger: BinaryMessenger
                         begin(result, session)
                         session.start()
                     }
+                    "images", "markGlyphs" -> {
+                        val id=call.argument<String>("id") ?: throw IllegalArgumentException()
+                        val session=sessions[id] ?: run {result.error("missing_session", "本地排版缓存已释放", null);return@setMethodCallHandler}
+                        val page=call.argument<Int>("page") ?: throw IllegalArgumentException()
+                        if (page < 0 || page >= (session.metadata?.get("count") as? Int ?: 0)) throw IllegalArgumentException()
+                        begin(result, session)
+                        session.web.evaluateJavascript("EpubEngine.select($page).catch(e=>EpubEngine.error=String(e));null") {
+                            if (call.method == "markGlyphs") session.pollMarkGlyphs() else session.pollImages()
+                        }
+                    }
                     "capture" -> {
                         val session = sessions[id]
                         if (session == null) { result.error("missing_session", "页面需要重新排版", null); return@setMethodCallHandler }
@@ -208,7 +218,7 @@ class EpubPageChannel(private val activity: Activity, messenger: BinaryMessenger
             if(destroyed || active!==this) return
             val expression=if(capture)
                 "({ready:!!window.EpubEngine?.ready,selected:!!window.EpubEngine?.selected,error:window.EpubEngine?.error})"
-                else "(window.EpubEngine?.ready?{ready:true,error:window.EpubEngine.error,pages:window.EpubEngine.pages,textLength:window.EpubEngine.textLength,text:window.EpubEngine.text}:{ready:false,error:window.EpubEngine?.error})"
+                else "(window.EpubEngine?.ready?{ready:true,error:window.EpubEngine.error,pages:window.EpubEngine.pages,textLength:window.EpubEngine.textLength,text:window.EpubEngine.text,imageCount:window.EpubEngine.imageCount}:{ready:false,error:window.EpubEngine?.error})"
             web.evaluateJavascript(expression) { raw ->
                 if(destroyed || active!==this) return@evaluateJavascript
                 try {
@@ -229,12 +239,57 @@ class EpubPageChannel(private val activity: Activity, messenger: BinaryMessenger
                             mapOf("start" to p.getInt("start"),"end" to p.getInt("end"))}
                         val text=info.optString("text")
                         require(text.length<=12*1024*1024)
-                        metadata=mapOf("count" to ranges.size,"ranges" to ranges,"textLength" to info.optInt("textLength"),"text" to text)
+                        metadata=mapOf("count" to ranges.size,"ranges" to ranges,"textLength" to info.optInt("textLength"),"text" to text,"imageCount" to info.optInt("imageCount"))
                         finish(metadata)
                     }
                 } catch (_:Exception) { sessions.remove(id);destroy();finishError("epub_render", "本地排版返回无效结果") }
             }
         }
+        fun pollImages() {
+            if(destroyed || active!==this) return
+            web.evaluateJavascript("({ready:!!window.EpubEngine?.selected,error:window.EpubEngine?.error,regions:window.EpubEngine?.selected?window.EpubEngine.imageRegions():[]})") { raw ->
+                if(destroyed || active!==this) return@evaluateJavascript
+                try {
+                    require(raw.length<=256*1024)
+                    val info=JSONObject(raw)
+                    if(!info.isNull("error")) {finishError("epub_images", "无法定位本页插图");return@evaluateJavascript}
+                    if(!info.optBoolean("ready")) {handler.postDelayed({pollImages()},35);return@evaluateJavascript}
+                    val regions=info.getJSONArray("regions")
+                    require(regions.length()<=256)
+                    finish((0 until regions.length()).map {i ->
+                        val image=regions.getJSONObject(i);val rect=image.getJSONArray("rect")
+                        require(rect.length()==4)
+                        mapOf("resource" to image.getString("resource"), "rect" to (0..3).map {rect.getDouble(it)})
+                    })
+                } catch (_:Exception) {finishError("epub_images", "插图位置数据无效")}
+            }
+        }
+        fun pollMarkGlyphs() {
+            if (destroyed || active !== this) return
+            web.evaluateJavascript("({ready:!!window.EpubEngine?.selected,error:window.EpubEngine?.error,glyphs:window.EpubEngine?.selected?window.EpubEngine.markGlyphs():[]})") { raw ->
+                if (destroyed || active !== this) return@evaluateJavascript
+                try {
+                    require(raw.length <= 2 * 1024 * 1024)
+                    val info = JSONObject(raw)
+                    if (!info.isNull("error")) {
+                        finishError("epub_marks", "无法定位本页文字"); return@evaluateJavascript
+                    }
+                    if (!info.optBoolean("ready")) {
+                        handler.postDelayed({ pollMarkGlyphs() }, 35); return@evaluateJavascript
+                    }
+                    val glyphs = info.getJSONArray("glyphs")
+                    require(glyphs.length() <= 8192)
+                    finish((0 until glyphs.length()).map { i ->
+                        val glyph = glyphs.getJSONArray(i)
+                        require(glyph.length() == 8)
+                        List<Number>(8) { n -> if (n < 4) glyph.getInt(n) else glyph.getDouble(n) }
+                    })
+                } catch (_: Exception) {
+                    finishError("epub_marks", "文字位置数据无效")
+                }
+            }
+        }
+
         fun capture() {
             if(destroyed || active!==this) return
             try {

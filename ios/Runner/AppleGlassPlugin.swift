@@ -29,8 +29,16 @@ private final class AppleGlassView: UIView, FlutterPlatformView, UITabBarControl
   private weak var parentController: UIViewController?
   private var tabs: UITabBarController?
   private var segments: UISegmentedControl?
+  private var slider: UISlider?
+  private var sliderEditing = false
+  private var sliderDiscardTouch = false
+  private var sliderRevision = 0
+  private var sliderGestureRevision = 0
+  private var sliderRestingValue: Float = 0
   private var surface: UIVisualEffectView?
   private var surfaceTint: UInt32?
+  private var surfaceCapsule = false
+  private var actionBar: UIStackView?
   private var menuButton: UIButton?
   private var menuItems: [[String: String]] = []
   private var applyingSelection = false
@@ -55,7 +63,19 @@ private final class AppleGlassView: UIView, FlutterPlatformView, UITabBarControl
       control.addTarget(self, action: #selector(selectSegment), for: .valueChanged)
       segments = control
       addSubview(control)
-    } else if kind == "surface" {
+    } else if kind == "slider" {
+      let control = UISlider()
+      control.isContinuous = true
+      control.addTarget(self, action: #selector(sliderStart), for: .touchDown)
+      control.addTarget(self, action: #selector(sliderChange), for: .valueChanged)
+      control.addTarget(self, action: #selector(sliderEnd), for: [.touchUpInside, .touchUpOutside])
+      control.addTarget(self, action: #selector(sliderCancel), for: .touchCancel)
+      // UIKit owns the iOS 26 glass thumb, stretch and release behavior.
+      // A thumb image or thumbTintColor would override the system material.
+      slider = control
+      addSubview(control)
+    } else if kind == "surface" || kind == "actions" {
+      surfaceCapsule = config["capsule"] as? Bool ?? false
       let effect: UIVisualEffect
       if #available(iOS 26.0, *) { effect = UIGlassEffect(style: .regular) }
       else { effect = UIBlurEffect(style: .systemMaterial) }
@@ -63,6 +83,12 @@ private final class AppleGlassView: UIView, FlutterPlatformView, UITabBarControl
       view.isUserInteractionEnabled = false
       surface = view; addSubview(view)
       layer.cornerRadius = 20; clipsToBounds = true
+      if kind == "actions" {
+        let stack = UIStackView()
+        stack.distribution = .fillEqually
+        actionBar = stack
+        addSubview(stack)
+      }
     } else if kind == "menu" {
       let button = UIButton(type: .system)
       prepare(button, symbol: "line.3.horizontal.decrease", title: "分类")
@@ -164,7 +190,35 @@ private final class AppleGlassView: UIView, FlutterPlatformView, UITabBarControl
     let color = UIColor(red: CGFloat((argb >> 16) & 255) / 255,
       green: CGFloat((argb >> 8) & 255) / 255, blue: CGFloat(argb & 255) / 255, alpha: 1)
     tintColor = color
+    if let slider {
+      let low = (config["min"] as? NSNumber)?.floatValue ?? 0
+      let high = (config["max"] as? NSNumber)?.floatValue ?? 1
+      let value = (config["value"] as? NSNumber)?.floatValue ?? low
+      guard low.isFinite, high.isFinite, value.isFinite, high > low else { return }
+      let revision = config["revision"] as? Int ?? 0
+      let enabled = config["enabled"] as? Bool ?? true
+      if sliderEditing && (revision != sliderRevision || !enabled) {
+        sliderDiscardTouch = true
+        sliderCancel()
+      }
+      sliderRevision = revision
+      if slider.minimumValue != low { slider.minimumValue = low }
+      if slider.maximumValue != high { slider.maximumValue = high }
+      sliderRestingValue = min(high, max(low, value))
+      if slider.isEnabled != enabled { slider.isEnabled = enabled }
+      if slider.tintColor != color { slider.tintColor = color }
+      if slider.minimumTrackTintColor != color { slider.minimumTrackTintColor = color }
+      // Flutter echoes drag values to update the label. Feeding these back
+      // into a tracking UIKit control interrupts its own presentation physics.
+      if !sliderEditing && !slider.isTracking {
+        slider.setValue(sliderRestingValue, animated: false)
+      }
+      return
+    }
     if let surface {
+      if let actionBar { updateActions(actionBar, config: config) }
+      surfaceCapsule = config["capsule"] as? Bool ?? false
+      setNeedsLayout()
       let argb = (config["tint"] as? NSNumber)?.uint32Value
       if #available(iOS 26.0, *), surfaceTint != argb {
         let glass = UIGlassEffect(style: .regular)
@@ -180,7 +234,24 @@ private final class AppleGlassView: UIView, FlutterPlatformView, UITabBarControl
     }
     if let button = menuButton {
       menuItems = config["items"] as? [[String: String]] ?? []
-      prepare(button, symbol: config["symbol"] as? String ?? "line.3.horizontal.decrease", title: config["label"] as? String ?? "分类")
+      let label = config["label"] as? String ?? "分类"
+      if config["textOnly"] as? Bool == true {
+        button.contentHorizontalAlignment = .trailing
+        if #available(iOS 15.0, *) {
+          var style = UIButton.Configuration.plain()
+          style.title = label
+          style.titleLineBreakMode = .byTruncatingTail
+          style.contentInsets = .zero
+          style.baseForegroundColor = color
+          button.configuration = style
+        } else {
+          button.setImage(nil, for: .normal)
+          button.setTitle(label, for: .normal)
+        }
+      } else {
+        button.contentHorizontalAlignment = .center
+        prepare(button, symbol: config["symbol"] as? String ?? "line.3.horizontal.decrease", title: label)
+      }
       if #available(iOS 14.0, *) {
         let selected = config["selected"] as? String
         let groups = Array(NSOrderedSet(array: menuItems.map { $0["group"] ?? "" })) as? [String] ?? []
@@ -232,6 +303,36 @@ private final class AppleGlassView: UIView, FlutterPlatformView, UITabBarControl
     }
   }
 
+  private func updateActions(_ stack: UIStackView, config: [String: Any]) {
+    let actions = config["actions"] as? [[String: Any]] ?? []
+    while stack.arrangedSubviews.count > actions.count {
+      guard let view = stack.arrangedSubviews.last else { break }
+      stack.removeArrangedSubview(view)
+      view.removeFromSuperview()
+    }
+    while stack.arrangedSubviews.count < actions.count {
+      let button = UIButton(type: .system)
+      button.tintColor = .label
+      button.addTarget(self, action: #selector(activateAction(_:)), for: .touchUpInside)
+      stack.addArrangedSubview(button)
+    }
+    let symbolStyle = UIImage.SymbolConfiguration(pointSize: 19, weight: .regular)
+    for (view, action) in zip(stack.arrangedSubviews, actions) {
+      guard let button = view as? UIButton else { continue }
+      button.accessibilityIdentifier = action["id"] as? String
+      button.accessibilityLabel = action["label"] as? String
+      button.isEnabled = action["enabled"] as? Bool ?? false
+      if let symbol = action["symbol"] as? String {
+        button.setImage(UIImage(systemName: symbol, withConfiguration: symbolStyle), for: .normal)
+      }
+    }
+  }
+
+  @objc private func activateAction(_ button: UIButton) {
+    guard button.isEnabled, let id = button.accessibilityIdentifier else { return }
+    channel.invokeMethod("action", arguments: ["action": id])
+  }
+
   override func didMoveToWindow() {
     super.didMoveToWindow()
     if window != nil, let tabs, tabs.parent == nil, let parentController {
@@ -242,7 +343,26 @@ private final class AppleGlassView: UIView, FlutterPlatformView, UITabBarControl
 
   override func layoutSubviews() {
     super.layoutSubviews()
-    if let surface { surface.frame = bounds }
+    if let surface {
+      surface.frame = bounds
+      actionBar?.frame = bounds
+      if surfaceCapsule {
+        // Match Flutter's StadiumBorder on both the glass and its host. An
+        // outer clip alone leaves the material using its rectangular outline.
+        let radius = min(bounds.width, bounds.height) / 2
+        layer.cornerRadius = radius
+        layer.cornerCurve = .circular
+        surface.layer.cornerRadius = radius
+        surface.layer.cornerCurve = .circular
+        surface.clipsToBounds = true
+      } else {
+        layer.cornerRadius = 20
+        surface.layer.cornerRadius = 0
+      }
+    }
+    else if let slider {
+      slider.frame = bounds.insetBy(dx: 2, dy: 0)
+    }
     else if let button = menuButton { button.frame = bounds }
     else if let tabs {
       tabs.view.frame = bounds
@@ -279,6 +399,47 @@ private final class AppleGlassView: UIView, FlutterPlatformView, UITabBarControl
   }
   @objc private func changeTheme() { channel.invokeMethod("action", arguments: ["action": "theme"]) }
   @objc private func openSearch() { channel.invokeMethod("action", arguments: ["action": "search"]) }
+
+  private func sliderAction(_ action: String) {
+    guard let slider else { return }
+    channel.invokeMethod("action", arguments: ["action": action,
+      "value": Double(slider.value), "revision": sliderGestureRevision])
+  }
+
+  @objc private func sliderStart() {
+    guard slider?.isEnabled == true, !sliderEditing else { return }
+    sliderDiscardTouch = false
+    sliderEditing = true
+    sliderGestureRevision = sliderRevision
+    sliderAction("start")
+  }
+
+  @objc private func sliderChange() {
+    guard let slider, slider.isEnabled, !sliderDiscardTouch else { return }
+    // VoiceOver adjustments send valueChanged without touchDown/touchUp.
+    let accessibilityAdjustment = !sliderEditing && !slider.isTracking
+    if !sliderEditing { sliderStart() }
+    sliderAction("change")
+    if accessibilityAdjustment { sliderEnd() }
+  }
+
+  @objc private func sliderEnd() {
+    if sliderDiscardTouch {
+      sliderDiscardTouch = false
+      slider?.setValue(sliderRestingValue, animated: false)
+      return
+    }
+    guard sliderEditing else { return }
+    sliderEditing = false
+    sliderAction("end")
+  }
+
+  @objc private func sliderCancel() {
+    guard sliderEditing else { return }
+    sliderEditing = false
+    sliderAction("cancel")
+    if slider?.isTracking == false { slider?.setValue(sliderRestingValue, animated: false) }
+  }
 
   deinit {
     if kind == "toolbar" { AppleThemeReveal.shared.cancel() }

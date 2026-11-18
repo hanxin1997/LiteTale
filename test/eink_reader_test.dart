@@ -5,15 +5,21 @@ import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:wild/eink/eink_preferences.dart';
 import 'package:wild/eink/eink_reader_view.dart';
 import 'package:wild/models/reader_document.dart';
 import 'package:wild/models/reader_page.dart' as model;
 import 'package:wild/pages/novel/reader_cubit.dart';
+import 'package:wild/pages/novel/reader_image_viewer.dart';
+import 'package:wild/services/reader_images.dart';
 import 'package:wild/services/reader_rich_typography.dart';
+import 'package:wild/services/reader_viewport_layout.dart';
 import 'package:wild/services/reading_progress.dart';
 import 'package:wild/sources/book_source.dart';
 import 'package:wild/widgets/cached_image.dart';
+import 'package:wild/widgets/reader_illustration.dart';
 import 'package:wild/widgets/reader_paper_view.dart';
+import 'package:wild/widgets/reader_raster_readiness.dart';
 
 import 'epub_flow_integration_test.dart' as local;
 import 'paginated_reader_requests_test.dart' as fixture;
@@ -245,6 +251,76 @@ void main() {
     await tester.pumpWidget(const SizedBox());
     await cubit.close();
   });
+
+  testWidgets('inline illustration and preview share the same frame policy', (
+    tester,
+  ) async {
+    const url = 'https://fixture.invalid/inline.gif';
+    final ref = ReaderImageRef(
+      source: SourceId.bili,
+      url: url,
+      readLocal: () async => epubFixturePng(),
+    );
+    // Prime the real source-owned byte cache without a network request.
+    await ReaderImageRepository.instance.read(ref);
+    addTearDown(() => ReaderImageRepository.instance.invalidate(ref));
+    final layout = ReaderViewportLayout(
+      size: const Size(300, 400),
+      systemPadding: EdgeInsets.zero,
+      leftPadding: 0,
+      rightPadding: 0,
+      topBarHeight: 0,
+      bottomBarHeight: 0,
+    );
+    for (final enabled in [false, true]) {
+      await tester.pumpWidget(MaterialApp(
+        home: ReaderPaperLeaf(
+          page: const model.ReaderPage(content: url, isImage: true),
+          layout: layout,
+          chapterTitle: '',
+          source: ref.source,
+          textStyle: const TextStyle(),
+          paragraphSpacing: 0,
+          highContrast: enabled,
+        ),
+      ));
+      final preview = tester.widget<ReaderIllustration>(find.byType(ReaderIllustration));
+      final paper = tester.widget<ReaderRasterImage>(find.byType(ReaderRasterImage));
+      expect(preview.provider, same(paper.image));
+      expect((preview.provider as CachedImageProvider).staticFrame, enabled);
+    }
+  });
+
+  testWidgets('EPUB preview without an inline frame uses a still image on E Ink', (
+    tester,
+  ) async {
+    final preference = EInkPreferencesCubit(write: (_) async {});
+    addTearDown(preference.close);
+    await preference.setEnabled(true);
+    final ref = ReaderImageRef(
+      source: SourceId.localEpub,
+      url: 'fixture:epub-preview',
+      readLocal: () async => epubFixturePng(),
+    );
+    addTearDown(() => ReaderImageRepository.instance.invalidate(ref));
+    await tester.pumpWidget(BlocProvider.value(
+      value: preference,
+      child: MaterialApp(home: ReaderImageViewer(image: ref)),
+    ));
+    final picture = find.descendant(
+      of: find.byType(ReaderImageViewer),
+      matching: find.byType(Image),
+    );
+    for (var i = 0; i < 25 && picture.evaluate().isEmpty; i++) {
+      await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 40)));
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+    expect(picture, findsOneWidget);
+    final provider = tester.widget<Image>(picture).image as ResizeImage;
+    expect(provider.imageProvider, isA<EInkMemoryImage>());
+    expect(provider.resolve(ImageConfiguration.empty).completer,
+        isA<OneFrameImageStreamCompleter>());
+  }, variant: TargetPlatformVariant.only(TargetPlatform.android));
 
   test('static images keep source ownership and separate decoded cache keys', () {
     final normal = CachedImageProvider('https://example.invalid/book.gif',

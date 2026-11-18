@@ -1,10 +1,13 @@
+import 'package:wild/eink/eink_theme.dart';
+import 'package:wild/eink/eink_scope.dart';
+import 'package:wild/eink/eink_preferences.dart';
+import 'package:wild/eink/eink_policy.dart';
 import 'package:wild/theme/ios_system_colors.dart';
 import 'package:flutter/material.dart';
 import 'dart:io';
-import 'package:wild/pages/apple_books_open_page.dart';
-import 'package:wild/sources/book_source.dart' as book_sources;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
+import 'package:wild/sources/book_source.dart' show supportsLocalEpub;
 import 'package:wild/widgets/bili_browser_host.dart';
 import 'package:wild/widgets/huanmeng_browser_host.dart';
 import 'package:flutter_localizations/flutter_localizations.dart';
@@ -21,8 +24,7 @@ import 'package:wild/pages/home_page.dart';
 import 'package:wild/pages/novel/line_height_cubit.dart';
 import 'package:wild/pages/novel/novel_info_page.dart';
 import 'package:wild/pages/novel/novel_downloading_page.dart';
-import 'package:wild/pages/novel/reader_page.dart';
-import 'package:wild/pages/novel/html_reader_page.dart';
+import 'package:wild/pages/novel/reader_route.dart';
 import 'package:wild/pages/novel/font_size_cubit.dart';
 import 'package:wild/pages/novel/paragraph_spacing_cubit.dart';
 import 'package:wild/pages/novel/theme_cubit.dart';
@@ -31,7 +33,7 @@ import 'package:wild/src/rust/frb_generated.dart';
 import 'package:wild/src/rust/wenku8/models.dart';
 import 'package:wild/pages/home/bookshelf_cubit.dart';
 import 'package:wild/pages/home/category_page.dart';
-import 'package:wild/pages/articlelist/articlelist_page.dart';
+import 'package:wild/pages/home/index_page.dart' show ArticlelistPage;
 import 'package:wild/pages/recommend/recommend_page.dart';
 import 'package:wild/pages/home/more_page.dart';
 import 'package:wild/pages/search_page.dart';
@@ -57,10 +59,7 @@ import 'package:wild/settings/reading_statistics.dart';
 import 'package:wild/settings/settings_theme.dart';
 import 'package:wild/theme/ios_glass_theme.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
-import 'package:wild/eink/eink_preferences.dart';
-import 'package:wild/eink/eink_policy.dart';
-import 'package:wild/eink/eink_scope.dart';
-import 'package:wild/eink/eink_theme.dart';
+import 'package:wild/widgets/ios_app_dock.dart';
 
 final lightTheme = ThemeData(
   colorScheme: ColorScheme.fromSeed(seedColor: Colors.blue),
@@ -82,9 +81,16 @@ Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   LicenseRegistry.addLicense(() async* {
     yield LicenseEntryWithLineBreaks([
-      'foliate-js',
-    ], await rootBundle.loadString('lib/assets/epub_foliate_LICENSE.txt'));
+      'Tabler Icons',
+    ], await rootBundle.loadString('LICENSES/tabler-icons-MIT.txt'));
   });
+  if (supportsLocalEpub) {
+    LicenseRegistry.addLicense(() async* {
+      yield LicenseEntryWithLineBreaks([
+        'foliate-js',
+      ], await rootBundle.loadString('lib/assets/epub_foliate_LICENSE.txt'));
+    });
+  }
   await AppInfo.init();
   await RustLib.init();
   runApp(const MyApp());
@@ -97,9 +103,9 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MultiBlocProvider(
       providers: [
+        BlocProvider(create: (_) => EInkPreferencesCubit()),
         BlocProvider(create: (_) => FontSettingsCubit()),
         BlocProvider(create: (_) => SettingsPreferencesCubit()),
-        BlocProvider(create: (_) => EInkPreferencesCubit()),
         BlocProvider(create: (_) => ReadingStatisticsCubit()),
         BlocProvider(create: (_) => AppAccentCubit()),
         BlocProvider(create: (_) => ReaderCurlCubit()),
@@ -133,6 +139,15 @@ class YourApp extends StatefulWidget {
 
 class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
   final _dynamicColorKey = GlobalKey<DynamicColorBuilderState>();
+  final _iosDock =
+      usesAppleGlass
+          ? IosDockController(
+            fullscreenRoutes: const {
+              novelReaderRouteName,
+              novelListeningRouteName,
+            },
+          )
+          : null;
 
   @override
   void initState() {
@@ -150,6 +165,7 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _iosDock?.dispose();
     super.dispose();
   }
 
@@ -160,9 +176,7 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
     );
     final settings = context.watch<SettingsPreferencesCubit>().state;
     final eink = einkEnabled(context);
-    // Apply the device display policy after the user's font and locale. The
-    // saved theme stays intact, so disabling the mode restores it immediately.
-    ThemeData displayTheme(ThemeData normal) =>
+    ThemeData effectiveLightTheme(ThemeData normal) =>
         eink ? einkTheme(normal) : normal;
     return BlocBuilder<ThemeCubit, ReaderTheme>(
       builder: (context, theme) {
@@ -176,27 +190,42 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
                       debugShowCheckedModeBanner: false,
                       themeAnimationDuration: Duration.zero,
                       themeAnimationCurve: Curves.easeInOutCubic,
-                      builder:
-                          (context, child) => EInkScope(
-                            child: Wenku8BrowserHost(
-                              child: BiliBrowserHost(
-                                child:
-                                    Platform.isIOS
-                                        ? HuanmengBrowserHost(
-                                          child: ThemeRevealHost(child: child!),
-                                        )
-                                        : ThemeRevealHost(child: child!),
-                              ),
+                      navigatorObservers: [if (_iosDock case final dock?) dock],
+                      builder: (context, child) {
+                        final dock = _iosDock;
+                        final app = ThemeRevealHost(
+                          child:
+                              dock == null
+                                  ? child!
+                                  // These routes have no Hero flights. Avoid
+                                  // their hidden destination measurement.
+                                  : HeroControllerScope.none(
+                                    child: IosAppDockHost(
+                                      controller: dock,
+                                      child: child!,
+                                    ),
+                                  ),
+                        );
+                        return EInkScope(
+                          child: Wenku8BrowserHost(
+                            child: BiliBrowserHost(
+                              child:
+                                  Platform.isIOS
+                                      ? HuanmengBrowserHost(child: app)
+                                      : app,
                             ),
                           ),
-                      themeMode: eink
-                          ? ThemeMode.light
-                          : switch (theme.themeMode) {
-                            ReaderThemeMode.auto => ThemeMode.system,
-                            ReaderThemeMode.light => ThemeMode.light,
-                            ReaderThemeMode.dark => ThemeMode.dark,
-                          },
-                      theme: displayTheme(
+                        );
+                      },
+                      themeMode:
+                          eink
+                              ? ThemeMode.light
+                              : switch (theme.themeMode) {
+                                ReaderThemeMode.auto => ThemeMode.system,
+                                ReaderThemeMode.light => ThemeMode.light,
+                                ReaderThemeMode.dark => ThemeMode.dark,
+                              },
+                      theme: effectiveLightTheme(
                         applySettingsTheme(
                           applyImportedAppFont(
                             usesMaterialYou
@@ -219,8 +248,6 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
                           settings,
                         ),
                       ),
-                      // The effective mode is light while E Ink is enabled;
-                      // keep the user's dark theme ready for normal mode.
                       darkTheme: applySettingsTheme(
                         applyImportedAppFont(
                           usesMaterialYou
@@ -247,30 +274,23 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
                       localizationsDelegates:
                           GlobalMaterialLocalizations.delegates,
                       onGenerateRoute: (settings) {
-                        // Capture only the new display override. An E Ink
-                        // reader stays paginated until it closes; ordinary
-                        // routes keep their existing reader preference lookup.
-                        final openedWithEink =
-                            settings.name == '/novel/reader' &&
-                            einkEnabled(context, listen: false);
+                        if (settings.name == novelInfoRouteName) {
+                          return novelInfoRoute(settings);
+                        }
+                        if (settings.name == novelReaderRouteName) {
+                          return novelReaderRoute(settings);
+                        }
                         final routes = <String, WidgetBuilder>{
                           '/init': (context) => const InitPage(),
                           '/login':
                               (context) =>
                                   const UpdateChecker(child: LoginPage()),
-                          '/home':
-                              (context) =>
-                                  const UpdateChecker(child: HomePage()),
-                          '/novel/info': (context) {
-                            final args =
-                                ModalRoute.of(context)!.settings.arguments;
-                            if (args is Map<String, dynamic>) {
-                              return NovelInfoPage(
-                                novelId: args['novelId'] as String,
-                              );
-                            }
-                            return NovelInfoPage(novelId: args as String);
-                          },
+                          IosDockController.homeRouteName:
+                              (context) => UpdateChecker(
+                                child: HomePage(
+                                  tabSelection: _iosDock?.selection,
+                                ),
+                              ),
                           '/novel/reviews': (context) {
                             final args =
                                 ModalRoute.of(context)!.settings.arguments
@@ -291,65 +311,6 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
                               volumes: (args['volumes'] as List).cast<Volume>(),
                             );
                           },
-                          '/novel/reader': (context) {
-                            final args =
-                                ModalRoute.of(context)!.settings.arguments
-                                    as Map<String, dynamic>;
-                            final aid = args['novelId'] as String;
-                            if (Platform.isIOS &&
-                                book_sources.sourceOf(aid) ==
-                                    book_sources.SourceId.localEpub) {
-                              return AppleBooksOpenPage(bookId: aid);
-                            }
-                            final readerType = openedWithEink
-                                ? ReaderType.normal
-                                : context.read<ReaderTypeCubit>().state;
-
-                            if (readerType == ReaderType.html) {
-                              return HtmlReaderPage(
-                                novelInfo: args['novelInfo'] as NovelInfo,
-                                initialAid: args['novelId'] as String,
-                                initialCid: args['chapterId'] as String,
-                                volumes:
-                                    (args['volumes'] as List).cast<Volume>(),
-                              );
-                            } else {
-                              return MultiBlocProvider(
-                                providers: [
-                                  BlocProvider.value(
-                                    value: context.read<FontSizeCubit>(),
-                                  ),
-                                  BlocProvider.value(
-                                    value:
-                                        context.read<ParagraphSpacingCubit>(),
-                                  ),
-                                  BlocProvider.value(
-                                    value: context.read<LineHeightCubit>(),
-                                  ),
-                                  BlocProvider.value(
-                                    value: context.read<ThemeCubit>(),
-                                  ),
-                                  BlocProvider.value(
-                                    value: context.read<TopBarHeightCubit>(),
-                                  ),
-                                  BlocProvider.value(
-                                    value: context.read<BottomBarHeightCubit>(),
-                                  ),
-                                ],
-                                child: ReaderPage(
-                                  aid: args['novelId'] as String,
-                                  cid: args['chapterId'] as String,
-                                  initialTitle: args['title'] as String,
-                                  volumes:
-                                      (args['volumes'] as List).cast<Volume>(),
-                                  novelInfo: args['novelInfo'] as NovelInfo,
-                                  initialPage: args['initialPage'] as int?,
-                                  initialTextOffset:
-                                      args['initialTextOffset'] as int?,
-                                ),
-                              );
-                            }
-                          },
                           '/category': (context) {
                             final args =
                                 ModalRoute.of(context)!.settings.arguments;
@@ -364,7 +325,11 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
                             }
                             return const CategoryPage();
                           },
-                          '/articlelist': (context) => const ArticlelistPage(),
+                          '/articlelist':
+                              (context) => Scaffold(
+                                appBar: AppBar(title: const Text('完结')),
+                                body: const ArticlelistPage(),
+                              ),
                           '/recommend': (context) => const RecommendPage(),
                           '/more': (context) => const MorePage(),
                           '/search': (context) {
@@ -386,6 +351,10 @@ class _YourAppState extends State<YourApp> with WidgetsBindingObserver {
                         return HorizontalCoverPageRoute<void>(
                           builder: builder,
                           settings: settings,
+                          animateEntrance:
+                              !usesAppleGlass ||
+                              settings.name != IosDockController.homeRouteName,
+                          cachePageDuringTransition: settings.name == '/about',
                         );
                       },
                     ),

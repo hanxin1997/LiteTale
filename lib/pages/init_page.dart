@@ -6,10 +6,12 @@ import 'package:wild/cubits/app_accent_cubit.dart';
 import 'package:wild/cubits/reader_curl_cubit.dart';
 import 'package:wild/cubits/font_settings_cubit.dart';
 import 'package:wild/sources/source_api.dart' show loadSourceSelection;
+import 'package:wild/sources/book_source.dart' show supportsLocalEpub;
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:wild/widgets/app_launch_screen.dart';
+import 'package:wild/widgets/apple_reader_panel.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:wild/pages/auth_cubit.dart';
 import 'package:wild/pages/novel/font_size_cubit.dart';
@@ -43,6 +45,12 @@ class InitPage extends StatefulWidget {
 
 class _InitPageState extends State<InitPage> {
   Future<void> _initializeCubits() async {
+    final launchHold =
+        Platform.isIOS
+            ? WidgetsBinding.instance.endOfFrame.then(
+              (_) => Future<void>.delayed(const Duration(milliseconds: 550)),
+            )
+            : Future<void>.value();
     String root;
     if (Platform.isMacOS || Platform.isLinux || Platform.isWindows) {
       root = await desktopRoot();
@@ -71,10 +79,13 @@ class _InitPageState extends State<InitPage> {
 
     // 等待所有 Cubit 初始化完成
     await IosSystemColors.initialize();
+    if (!mounted) return;
     await Future.wait([
-      LocalEpubLibrary.instance.initialize(root).catchError((Object _) {
-        // Local library exposes a retryable error; online reading still starts.
-      }),
+      if (Platform.isIOS) AppleReaderPanel.available.then<void>((_) {}),
+      if (supportsLocalEpub)
+        LocalEpubLibrary.instance.initialize(root).catchError((Object _) {
+          // Local library exposes a retryable error; online reading still starts.
+        }),
       context.read<FontSettingsCubit>().initialize(root),
       context.read<AppAccentCubit>().load(),
       context.read<ReaderCurlCubit>().load(),
@@ -102,6 +113,8 @@ class _InitPageState extends State<InitPage> {
     AppLogs.instance.level =
         context.read<SettingsPreferencesCubit>().state.logLevel;
 
+    await launchHold;
+    if (!mounted || ModalRoute.isCurrentOf(context) == false) return;
     Navigator.pushReplacementNamed(context, '/home');
   }
 

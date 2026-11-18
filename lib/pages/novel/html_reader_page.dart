@@ -1,5 +1,11 @@
+import 'package:wild/widgets/reader_chapter_sheet.dart';
+import 'package:wild/widgets/reader_controls.dart';
+import 'package:wild/widgets/reader_settings_panel.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:flutter/material.dart';
+import 'package:wild/services/reader_images.dart';
+import 'package:wild/widgets/reader_illustration.dart';
+import 'package:wild/widgets/app_loading_indicator.dart';
 import 'package:wild/widgets/source_website.dart';
 import 'dart:math' as math;
 import 'package:wild/models/reader_page.dart' show ReaderFragment;
@@ -20,9 +26,7 @@ import 'package:wild/pages/novel/font_size_cubit.dart';
 import 'package:wild/pages/novel/line_height_cubit.dart';
 import 'package:wild/pages/novel/paragraph_spacing_cubit.dart';
 import 'package:wild/pages/novel/theme_cubit.dart';
-import 'package:wild/pages/novel/reader_type_cubit.dart';
 import 'package:wild/cubits/reader_background_cubit.dart';
-import 'package:flutter_colorpicker/flutter_colorpicker.dart';
 import 'package:wild/widgets/cached_image.dart';
 import 'package:wild/pages/novel/fullscreen_cubit.dart';
 import 'package:wild/cubits/screen_keep_on.dart';
@@ -30,20 +34,31 @@ import 'package:wild/pages/novel/auto_scroll_cubit.dart';
 import 'package:wild/pages/novel/auto_scroll_config_cubit.dart';
 import 'package:wild/utils/controller_event.dart';
 import 'package:wild/widgets/reader_volume_turn_scope.dart';
-import 'package:wild/widgets/reader_volume_turn_setting.dart';
-import 'package:wild/eink/eink_overlays.dart';
+import 'package:wild/widgets/reader_speech_scope.dart';
+import 'package:wild/services/reader_listening_chapter.dart';
 import 'package:wild/theme/app_fonts.dart';
 import 'package:wild/cubits/font_settings_cubit.dart';
 import 'dart:io';
 import 'package:wild/settings/settings_preferences.dart';
 import 'package:wild/settings/reading_session_scope.dart';
 import 'package:wild/widgets/bili_recovery_button.dart';
+import 'package:wild/widgets/wenku8_recovery_button.dart';
+import 'dart:async';
+import 'package:flutter/rendering.dart' show RenderAbstractViewport;
+import 'package:wild/models/reader_mark.dart';
+import 'package:wild/services/reader_mark_store.dart';
+import 'package:wild/widgets/reader_mark_selection.dart';
+import 'package:wild/widgets/reader_marks_panel.dart';
+import 'package:wild/theme/ios_page_arrival.dart';
+import 'package:wild/services/reading_progress.dart';
 
 class HtmlReaderPage extends StatelessWidget {
   final NovelInfo novelInfo;
   final String initialAid;
   final String initialCid;
   final List<Volume> volumes;
+  final ReaderMarkStore? markStore;
+  final int? initialTextOffset;
 
   const HtmlReaderPage({
     super.key,
@@ -51,6 +66,8 @@ class HtmlReaderPage extends StatelessWidget {
     required this.initialAid,
     required this.initialCid,
     required this.volumes,
+    this.markStore,
+    this.initialTextOffset,
   });
 
   @override
@@ -64,6 +81,8 @@ class HtmlReaderPage extends StatelessWidget {
                 initialAid: initialAid,
                 initialCid: initialCid,
                 initialVolumes: volumes,
+                initialTextOffset: initialTextOffset,
+                initialRouteArrival: IosPageArrival.pendingOf(context),
               )..loadChapter(),
         ),
         BlocProvider(create: (context) => FullscreenCubit()),
@@ -72,13 +91,17 @@ class HtmlReaderPage extends StatelessWidget {
           create: (context) => AutoScrollConfigCubit()..loadConfig(),
         ),
       ],
-      child: const ReadingProgressScope(child: _HtmlReaderViewWrapper()),
+      child: ReadingProgressScope(
+        child: _HtmlReaderViewWrapper(bookId: initialAid, markStore: markStore),
+      ),
     );
   }
 }
 
 class _HtmlReaderViewWrapper extends StatefulWidget {
-  const _HtmlReaderViewWrapper();
+  const _HtmlReaderViewWrapper({required this.bookId, this.markStore});
+  final String bookId;
+  final ReaderMarkStore? markStore;
 
   @override
   State<_HtmlReaderViewWrapper> createState() => _HtmlReaderViewWrapperState();
@@ -88,13 +111,53 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   late final ScrollController _scrollController;
   final _readingSessionKey = GlobalKey<ReadingSessionScopeState>();
+  final _markViewport = GlobalKey();
   late final FrameAutoScroller _autoScroller;
+  late final ReaderMarkSelection _marks;
+  bool _selecting = false;
+  int _jumpRevision = 0;
+  bool _progressScheduled = false;
+  bool _restoringOffset = false;
+  bool _leaving = false;
+  ({ReaderMarkChapter chapter, int index, int revision})? _landing;
 
   @override
   void initState() {
     super.initState();
     setKeepScreenUpOnReading(true);
-    _scrollController = ScrollController();
+    _scrollController = ScrollController(keepScrollOffset: false);
+    final cubit = context.read<HtmlReaderCubit>();
+    _marks = ReaderMarkSelection(
+      viewport: _markViewport,
+      book: widget.bookId,
+      store: widget.markStore,
+      chapterText: (chapter, axis) {
+        final state = cubit.state;
+        if (axis != ReaderMarkAxis.text ||
+            state is! HtmlReaderLoaded ||
+            chapter.aid != state.aid ||
+            chapter.cid != state.cid) {
+          return null;
+        }
+        return (
+          text: state.markContent ?? state.rawContent,
+          encoded: state.sourceFont != null,
+        );
+      },
+      canSelect:
+          (group) =>
+              mounted &&
+              cubit.state is HtmlReaderLoaded &&
+              ModalRoute.of(context)?.isCurrent != false,
+      onStart: () {
+        context.read<AutoScrollCubit>().stop();
+        _stopAutoScroll();
+        final fullscreen = context.read<FullscreenCubit>();
+        if (!fullscreen.state) fullscreen.toggle();
+      },
+    )..addListener(_selectionChanged);
+    _scrollController.addListener(_onScroll);
+    unawaited(_marks.store.load(_marks.book).catchError((Object _) {}));
     WidgetsBinding.instance.addObserver(this);
     _autoScroller = FrameAutoScroller(
       vsync: this,
@@ -118,45 +181,188 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
     WidgetsBinding.instance.removeObserver(this);
     _autoScroller.dispose();
     _scrollController.dispose();
+    _marks.dispose();
 
     super.dispose();
   }
 
-  void _showSettings(BuildContext context) {
-    final fontSizeCubit = context.read<FontSizeCubit>();
-    final lineHeightCubit = context.read<LineHeightCubit>();
-    final paragraphSpacingCubit = context.read<ParagraphSpacingCubit>();
-    final themeCubit = context.read<ThemeCubit>();
-    final topBarHeightCubit = context.read<TopBarHeightCubit>();
-    final bottomBarHeightCubit = context.read<BottomBarHeightCubit>();
-    final leftPaddingCubit = context.read<LeftPaddingCubit>();
-    final rightPaddingCubit = context.read<RightPaddingCubit>();
-    final readerTypeCubit = context.read<ReaderTypeCubit>();
-    final readerBackgroundCubit = context.read<ReaderBackgroundCubit>();
-    final autoScrollConfigCubit = context.read<AutoScrollConfigCubit>();
+  void _selectionChanged() {
+    final selecting = _marks.value != null;
+    if (selecting != _selecting && mounted) {
+      setState(() => _selecting = selecting);
+    }
+  }
 
-    showAppBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      builder: (BuildContext bottomSheetContext) {
-        return MultiBlocProvider(
-          providers: [
-            BlocProvider.value(value: fontSizeCubit),
-            BlocProvider.value(value: lineHeightCubit),
-            BlocProvider.value(value: paragraphSpacingCubit),
-            BlocProvider.value(value: themeCubit),
-            BlocProvider.value(value: topBarHeightCubit),
-            BlocProvider.value(value: bottomBarHeightCubit),
-            BlocProvider.value(value: leftPaddingCubit),
-            BlocProvider.value(value: rightPaddingCubit),
-            BlocProvider.value(value: readerTypeCubit),
-            BlocProvider.value(value: readerBackgroundCubit),
-            BlocProvider.value(value: autoScrollConfigCubit),
-          ],
-          child: _ReaderSettings(),
-        );
-      },
+  double get _topInset =>
+      context.read<TopBarHeightCubit>().state +
+      MediaQueryData.fromView(View.of(context)).padding.top;
+
+  void _onScroll() {
+    _marks.clear();
+    if (_progressScheduled || _restoringOffset || _leaving) return;
+    _progressScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _progressScheduled = false;
+      if (mounted && !_leaving) _saveVisiblePosition();
+    });
+  }
+
+  void _saveVisiblePosition() {
+    if (_restoringOffset || !_scrollController.hasClients) return;
+    final cubit = context.read<HtmlReaderCubit>();
+    final location = _marks.visiblePosition(0, _topInset);
+    if (location != null) {
+      cubit.recordVisibleOffset(
+        location.chapter.aid,
+        location.chapter.cid,
+        location.offset,
+      );
+    }
+  }
+
+  Future<void> _showChapterList(BuildContext context) async {
+    final cubit = context.read<HtmlReaderCubit>();
+    final chapter = await showReaderChapterSheet(
+      context,
+      volumes: cubit.initialVolumes,
+      currentAid: cubit.initialAid,
+      currentCid: cubit.initialCid,
     );
+    if (mounted && !cubit.isClosed && chapter != null) {
+      _saveVisiblePosition();
+      _marks.clear();
+      _landing = null;
+      await cubit.loadChapter(aid: chapter.aid, cid: chapter.cid);
+    }
+  }
+
+  Future<void> _showSettings(BuildContext context) async {
+    final cubit = context.read<HtmlReaderCubit>();
+    _marks.clear();
+    final open = await showReaderSettingsPanel(
+      context,
+      localEpub: sourceOf(cubit.initialAid) == SourceId.localEpub,
+      autoScroll: context.read<AutoScrollConfigCubit>(),
+      includeMarks: cubit.state is HtmlReaderLoaded,
+    );
+    final state = cubit.state;
+    if (!open ||
+        !mounted ||
+        !context.mounted ||
+        state is! HtmlReaderLoaded ||
+        ModalRoute.of(context)?.isCurrent == false) {
+      return;
+    }
+    final chapter = (aid: state.aid, cid: state.cid);
+    final current =
+        _marks.visiblePosition(0, _topInset) ??
+        ReaderMarkLocation(
+          chapter,
+          state.title,
+          ReaderMarkAxis.text,
+          state.parsedContent.firstOrNull?.offset ?? 0,
+        );
+    final text = state.markContent ?? state.rawContent;
+    final quote =
+        current.offset < text.length
+            ? readerMarkExcerpt(
+              text.substring(current.offset).characters.take(72).toString(),
+              encoded: state.sourceFont != null,
+            )
+            : '';
+    final mark = await showReaderMarks(
+      context,
+      selection: _marks,
+      current: current,
+      bookmarkExcerpt: quote,
+    );
+    if (mark != null && mounted && !cubit.isClosed) {
+      await _openMark(cubit, mark);
+    }
+  }
+
+  Future<void> _openMark(HtmlReaderCubit cubit, ReaderMark mark) async {
+    final target = mark.location, chapter = mark.location.chapter;
+    final revision = ++_jumpRevision;
+    _marks.clear();
+    if (target.axis != ReaderMarkAxis.text) {
+      showReaderMarkError(context, '请切回分页模式查看此书签');
+      return;
+    }
+    var state = cubit.state;
+    if (state is! HtmlReaderLoaded ||
+        state.aid != chapter.aid ||
+        state.cid != chapter.cid) {
+      await cubit.loadChapter(aid: chapter.aid, cid: chapter.cid);
+      state = cubit.state;
+    }
+    if (!mounted ||
+        revision != _jumpRevision ||
+        state is! HtmlReaderLoaded ||
+        state.aid != chapter.aid ||
+        state.cid != chapter.cid) {
+      return;
+    }
+    final offset = mark.offsetIn(state.markContent ?? state.rawContent);
+    if (offset == null || state.parsedContent.isEmpty) {
+      showReaderMarkError(context, '未能定位该标记');
+      return;
+    }
+    await _restoreOffset(state, offset, revision);
+  }
+
+  Future<void> _restoreOffset(
+    HtmlReaderLoaded state,
+    int offset,
+    int revision,
+  ) async {
+    final cubit = context.read<HtmlReaderCubit>();
+    final chapter = (aid: state.aid, cid: state.cid);
+    var index = 0;
+    while (index + 1 < state.parsedContent.length &&
+        state.parsedContent[index + 1].offset <= offset) {
+      index++;
+    }
+    _restoringOffset = true;
+    try {
+      setState(
+        () => _landing = (chapter: chapter, index: index, revision: revision),
+      );
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted ||
+          _leaving ||
+          revision != _jumpRevision ||
+          !identical(cubit.state, state) ||
+          !_scrollController.hasClients) {
+        return;
+      }
+      final position = ReaderMarkLocation(
+        chapter,
+        state.title,
+        ReaderMarkAxis.text,
+        offset,
+      );
+      final rendered = _marks.renderedPosition(position);
+      if (rendered != null) {
+        final viewport = RenderAbstractViewport.maybeOf(rendered.box);
+        if (viewport != null) {
+          final scroll = _scrollController.position;
+          final y =
+              viewport
+                  .getOffsetToReveal(rendered.box, 0, rect: rendered.rect)
+                  .offset;
+          _scrollController.jumpTo(
+            (y - _topInset).clamp(
+              scroll.minScrollExtent,
+              scroll.maxScrollExtent,
+            ),
+          );
+        }
+      }
+      cubit.recordVisibleOffset(state.aid, state.cid, offset);
+    } finally {
+      if (revision == _jumpRevision) _restoringOffset = false;
+    }
   }
 
   void _toggleAutoScroll(BuildContext context) {
@@ -189,13 +395,15 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state != AppLifecycleState.resumed) {
       _stopAutoScroll();
+      _saveVisiblePosition();
+      unawaited(ReadingProgressQueue.instance.flushBounded());
     } else if (context.read<AutoScrollCubit>().state) {
       _startAutoScroll();
     }
   }
 
   void _onController(ReaderControllerEventArgs args) {
-    if (!mounted || !_scrollController.hasClients) return;
+    if (!mounted || !_scrollController.hasClients || _selecting) return;
     _readingSessionKey.currentState?.recordActivity();
     context.read<AutoScrollCubit>().stop();
     _stopAutoScroll();
@@ -203,17 +411,19 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
     if (args.key == "UP") {
       // 音量上键 - 向上滚动
       final currentOffset = _scrollController.offset;
-      if (currentOffset <= 0) {
+      final minimum = _scrollController.position.minScrollExtent;
+      if (currentOffset <= minimum) {
         // 已到达顶部，切换到上一章
         if (!settingsPreferencesOf(context, listen: false).boundaryChapters) {
           return;
         }
+        _saveVisiblePosition();
         context.read<HtmlReaderCubit>().goToPreviousChapter();
       } else {
         // 向上滚动一屏
         final screenHeight = _scrollController.position.viewportDimension;
         final targetOffset = (currentOffset - screenHeight * 0.8).clamp(
-          0.0,
+          minimum,
           _scrollController.position.maxScrollExtent,
         );
         _scrollController.jumpTo(targetOffset);
@@ -228,6 +438,7 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
         if (!settingsPreferencesOf(context, listen: false).boundaryChapters) {
           return;
         }
+        _saveVisiblePosition();
         context.read<HtmlReaderCubit>().goToNextChapter();
       } else {
         // 向下滚动一屏
@@ -261,10 +472,28 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
         final textColor =
             isDarkMode ? theme.darkTextColor : theme.lightTextColor;
 
-        return BlocBuilder<HtmlReaderCubit, HtmlReaderState>(
+        return BlocConsumer<HtmlReaderCubit, HtmlReaderState>(
+          listenWhen:
+              (previous, current) =>
+                  current is! HtmlReaderLoaded ||
+                  previous is! HtmlReaderLoaded ||
+                  previous.cid != current.cid ||
+                  previous.aid != current.aid,
+          listener: (context, state) {
+            _marks.clear();
+            if (state is! HtmlReaderLoaded) {
+              _restoringOffset = false;
+              if (_landing != null) setState(() => _landing = null);
+            } else if (state.initialOffset > 0 &&
+                state.parsedContent.isNotEmpty) {
+              unawaited(
+                _restoreOffset(state, state.initialOffset, ++_jumpRevision),
+              );
+            }
+          },
           builder: (context, state) {
-            return ReaderVolumeTurnScope(
-              active: state is HtmlReaderLoaded,
+            final reader = ReaderVolumeTurnScope(
+              active: state is HtmlReaderLoaded && !_selecting,
               onTurn: _onController,
               child: BlocBuilder<FullscreenCubit, bool>(
                 builder: (context, isFullscreen) {
@@ -301,9 +530,18 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
                           isReading: state is HtmlReaderLoaded,
                           child: PopScope(
                             canPop:
-                                !settingsPreferencesOf(context).preventBack ||
-                                !isFullscreen,
+                                !_selecting &&
+                                (!settingsPreferencesOf(context).preventBack ||
+                                    !isFullscreen),
                             onPopInvokedWithResult: (didPop, result) {
+                              if (didPop) {
+                                _saveVisiblePosition();
+                                _leaving = true;
+                                unawaited(
+                                  ReadingProgressQueue.instance.flushBounded(),
+                                );
+                              }
+                              if (!didPop && _marks.clear()) return;
                               if (!didPop && isFullscreen) {
                                 context.read<FullscreenCubit>().toggle();
                               }
@@ -311,79 +549,8 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
                             child: Scaffold(
                               backgroundColor: backgroundColor,
                               extendBodyBehindAppBar: true,
-                              appBar:
-                                  isFullscreen
-                                      ? null
-                                      : AppBar(
-                                        backgroundColor: backgroundColor
-                                            .withValues(alpha: 0.8),
-                                        elevation: 0,
-                                        title:
-                                            state is HtmlReaderLoaded
-                                                ? Text(state.title)
-                                                : const Text('加载中...'),
-                                        actions: [
-                                          BlocBuilder<AutoScrollCubit, bool>(
-                                            builder: (
-                                              context,
-                                              isAutoScrolling,
-                                            ) {
-                                              return AppIconButton(
-                                                icon: Icon(
-                                                  isAutoScrolling
-                                                      ? Icons.pause
-                                                      : Icons.play_arrow,
-                                                ),
-                                                onPressed:
-                                                    () => _toggleAutoScroll(
-                                                      context,
-                                                    ),
-                                              );
-                                            },
-                                          ),
-                                          AppIconButton(
-                                            icon: const Icon(Icons.settings),
-                                            onPressed:
-                                                () => _showSettings(context),
-                                          ),
-                                          AppIconButton(
-                                            icon: const Icon(Icons.menu),
-                                            onPressed: () {
-                                              showAppBottomSheet(
-                                                context: context,
-                                                builder:
-                                                    (
-                                                      context,
-                                                    ) => BlocProvider.value(
-                                                      value: cubit,
-                                                      child: _ChapterList(
-                                                        volumes:
-                                                            cubit
-                                                                .initialVolumes,
-                                                        currentAid:
-                                                            cubit.initialAid,
-                                                        currentCid:
-                                                            cubit.initialCid,
-                                                        onChapterSelected: (
-                                                          aid,
-                                                          cid,
-                                                        ) {
-                                                          cubit.loadChapter(
-                                                            aid: aid,
-                                                            cid: cid,
-                                                          );
-                                                          Navigator.pop(
-                                                            context,
-                                                          );
-                                                        },
-                                                      ),
-                                                    ),
-                                              );
-                                            },
-                                          ),
-                                        ],
-                                      ),
                               body: Stack(
+                                key: _markViewport,
                                 children: [
                                   // 背景图片
                                   if (backgroundImagePath != null)
@@ -399,6 +566,7 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
                                   // 底层内容
                                   GestureDetector(
                                     onTap: () {
+                                      if (_marks.clear()) return;
                                       context.read<FullscreenCubit>().toggle();
                                     },
                                     child:
@@ -438,31 +606,25 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
                                                       ),
                                                     ),
                                                     AppButton.elevated(
-                                                      onPressed: () {
-                                                        context
-                                                            .read<
-                                                              HtmlReaderCubit
-                                                            >()
-                                                            .loadChapter();
-                                                      },
+                                                      onPressed:
+                                                          cubit.retryChapter,
                                                       child: const Text('重试'),
+                                                    ),
+                                                    Wenku8RecoveryButton(
+                                                      error: state.cause,
+                                                      source: sourceOf(
+                                                        cubit.initialAid,
+                                                      ),
+                                                      onRecovered:
+                                                          cubit.retryChapter,
                                                     ),
                                                     BiliRecoveryButton(
                                                       error: state.cause,
                                                       source: sourceOf(
-                                                        context
-                                                            .read<
-                                                              HtmlReaderCubit
-                                                            >()
-                                                            .initialAid,
+                                                        cubit.initialAid,
                                                       ),
                                                       onRecovered:
-                                                          () =>
-                                                              context
-                                                                  .read<
-                                                                    HtmlReaderCubit
-                                                                  >()
-                                                                  .loadChapter(),
+                                                          cubit.retryChapter,
                                                     ),
                                                   ],
                                                 ),
@@ -470,31 +632,76 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
                                             )
                                             : state is HtmlReaderLoaded
                                             ? _ReaderContent(
+                                              key: ValueKey((
+                                                state.aid,
+                                                state.cid,
+                                                _landing?.revision,
+                                              )),
                                               parsedContent:
                                                   state.parsedContent,
-                                              // The open book owns its image policy;
-                                              // never read the global setting here.
+                                              marks: _marks,
+                                              markLocation: ReaderMarkLocation(
+                                                (
+                                                  aid: state.aid,
+                                                  cid: state.cid,
+                                                ),
+                                                state.title,
+                                                ReaderMarkAxis.text,
+                                                0,
+                                              ),
+                                              startIndex:
+                                                  _landing?.chapter ==
+                                                          (
+                                                            aid: state.aid,
+                                                            cid: state.cid,
+                                                          )
+                                                      ? _landing!.index
+                                                      : 0,
+                                              // The open book owns its image
+                                              // policy, including on scroll.
                                               source: sourceOf(
                                                 context
                                                     .read<HtmlReaderCubit>()
                                                     .initialAid,
                                               ),
                                               onPreviousChapter: () {
-                                                context
-                                                    .read<HtmlReaderCubit>()
-                                                    .goToPreviousChapter();
+                                                _saveVisiblePosition();
+                                                cubit.goToPreviousChapter();
                                               },
                                               onNextChapter: () {
-                                                context
-                                                    .read<HtmlReaderCubit>()
-                                                    .goToNextChapter();
+                                                _saveVisiblePosition();
+                                                cubit.goToNextChapter();
                                               },
                                               scrollController:
                                                   _scrollController,
                                             )
                                             : const SizedBox.shrink(),
                                   ),
-                                  // 顶部和底部导航按钮（仅在隐藏 AppBar 时显示）
+                                  Positioned(
+                                    top: 0,
+                                    left: 0,
+                                    right: 0,
+                                    child: ReaderMenuMotion(
+                                      visible: !isFullscreen,
+                                      child: ReaderToolbar(
+                                        title:
+                                            state is HtmlReaderLoaded
+                                                ? state.title
+                                                : cubit.novelInfo.title,
+                                        onBack: () => Navigator.pop(context),
+                                        onCatalog:
+                                            () => _showChapterList(context),
+                                        onSettings:
+                                            () => _showSettings(context),
+                                        onAutoScroll:
+                                            () => _toggleAutoScroll(context),
+                                      ),
+                                    ),
+                                  ),
+                                  if (state is HtmlReaderLoaded)
+                                    Positioned.fill(
+                                      child: ReaderMarkLayer(selection: _marks),
+                                    ),
                                 ],
                               ),
                             ),
@@ -505,6 +712,26 @@ class _HtmlReaderViewWrapperState extends State<_HtmlReaderViewWrapper>
                   );
                 },
               ),
+            );
+            return ReaderSpeechScope(
+              chapter:
+                  state is HtmlReaderLoaded
+                      ? ReaderListeningChapter(
+                        aid: state.aid,
+                        cid: state.cid,
+                        title: state.title,
+                        text: state.markContent ?? state.rawContent,
+                        encoded: state.sourceFont != null,
+                      )
+                      : null,
+              request:
+                  (chapter) => ReaderListeningRequest(
+                    chapter: chapter,
+                    volumes: cubit.initialVolumes,
+                    info: cubit.novelInfo,
+                    offset: _marks.visiblePosition(0, _topInset)?.offset ?? 0,
+                  ),
+              child: reader,
             );
           },
         );
@@ -519,14 +746,35 @@ class _ReaderContent extends StatelessWidget {
   final VoidCallback onNextChapter;
   final ScrollController scrollController;
   final SourceId source;
+  final ReaderMarkSelection marks;
+  final ReaderMarkLocation markLocation;
+  final int startIndex;
 
   const _ReaderContent({
+    super.key,
     required this.parsedContent,
     required this.onPreviousChapter,
     required this.onNextChapter,
     required this.scrollController,
     required this.source,
+    required this.marks,
+    required this.markLocation,
+    this.startIndex = 0,
   });
+
+  Widget _marked(
+    ParsedContent content,
+    String text,
+    Widget child, {
+    bool selectable = true,
+  }) => ReaderMarkedRegion(
+    selection: marks,
+    group: 0,
+    text: text,
+    location: markLocation.at(content.offset),
+    selectable: selectable,
+    child: child,
+  );
 
   Widget _buildContentWidget(
     BuildContext context,
@@ -552,79 +800,96 @@ class _ReaderContent extends StatelessWidget {
                 ? resolve(previous.marginBottom)
                 : paragraphSpacing,
           );
-          return ReaderStyledParagraph(
-            fragment: ReaderFragment(
-              block: content.block,
-              start: 0,
-              end: content.block.text.length,
-              first: true,
-              last: true,
-              gapBefore: gap,
-              gapAfter:
-                  content.endOfTextRun
-                      ? content.block.style.hasMargins
-                          ? resolve(content.block.style.marginBottom)
-                          : paragraphSpacing
-                      : 0,
+          return _marked(
+            content,
+            content.block.text,
+            ReaderStyledParagraph(
+              fragment: ReaderFragment(
+                block: content.block,
+                start: 0,
+                end: content.block.text.length,
+                first: true,
+                last: true,
+                gapBefore: gap,
+                gapAfter:
+                    content.endOfTextRun
+                        ? content.block.style.hasMargins
+                            ? resolve(content.block.style.marginBottom)
+                            : paragraphSpacing
+                        : 0,
+              ),
+              style: readerBodyStyle(
+                fontSize: fontSize,
+                lineHeight: lineHeight,
+                fontFamily: fontFamily,
+                boldText: MediaQuery.boldTextOf(context),
+              ).copyWith(color: textColor),
+              textScaler: MediaQuery.textScalerOf(context),
             ),
-            style: readerBodyStyle(
-              fontSize: fontSize,
-              lineHeight: lineHeight,
-              fontFamily: fontFamily,
-              boldText: MediaQuery.boldTextOf(context),
-            ).copyWith(color: textColor),
-            textScaler: MediaQuery.textScalerOf(context),
           );
         },
       );
     } else if (content is ParsedText) {
       return Padding(
         padding: EdgeInsets.only(bottom: paragraphSpacing),
-        child: Text(
+        child: _marked(
+          content,
           content.text,
-          style: TextStyle(
-            fontFamily: fontFamily,
-            locale: readerHanLocale,
-            fontFamilyFallback: const [appFontFamily],
-            fontSize: fontSize,
-            height: lineHeight,
-            color: textColor,
+          Text(
+            content.text,
+            style: TextStyle(
+              fontFamily: fontFamily,
+              locale: readerHanLocale,
+              fontFamilyFallback: const [appFontFamily],
+              fontSize: fontSize,
+              height: lineHeight,
+              color: textColor,
+            ),
           ),
         ),
       );
     } else if (content is ParsedImage) {
-      return LayoutBuilder(
-        builder: (context, constraints) {
-          return Padding(
-            padding: EdgeInsets.symmetric(vertical: paragraphSpacing),
-            child: SizedBox(
-              width: constraints.maxWidth,
-              child: AspectRatio(
-                aspectRatio: 4 / 3, // 默认图片比例
-                child: Image(
-                  image: CachedImageProvider(content.imageUrl, source: source),
-                  width: constraints.maxWidth,
-                  fit: BoxFit.contain,
-                  loadingBuilder: (context, child, loadingProgress) {
-                    if (loadingProgress == null) return child;
-                    return Container(
-                      width: constraints.maxWidth,
-                      color: Colors.grey[200],
-                      child: const Center(child: CircularProgressIndicator()),
-                    );
-                  },
-                  errorBuilder: (context, error, stackTrace) {
-                    return Container(
-                      width: constraints.maxWidth,
-                      color: Colors.grey[200],
-                      child: const Center(child: Text('图片加载失败')),
-                    );
-                  },
+      return _marked(
+        content,
+        '',
+        LayoutBuilder(
+          builder: (context, constraints) {
+            return Padding(
+              padding: EdgeInsets.symmetric(vertical: paragraphSpacing),
+              child: SizedBox(
+                width: constraints.maxWidth,
+                child: AspectRatio(
+                  aspectRatio: 4 / 3, // 默认图片比例
+                  child: ReaderIllustration(
+                    image: ReaderImageRef(
+                      source: source,
+                      url: content.imageUrl,
+                    ),
+                    provider: CachedImageProvider(
+                      content.imageUrl,
+                      source: source,
+                    ),
+                    child: Image(
+                      image: CachedImageProvider(
+                        content.imageUrl,
+                        source: source,
+                      ),
+                      fit: BoxFit.contain,
+                      loadingBuilder:
+                          (context, child, progress) =>
+                              progress == null
+                                  ? child
+                                  : const CenteredLoadingIndicator(),
+                      errorBuilder:
+                          (_, _, _) => const Center(child: Text('图片加载失败')),
+                    ),
+                  ),
                 ),
               ),
-            ),
-          );
-        },
+            );
+          },
+        ),
+        selectable: false,
       );
     }
     return const SizedBox.shrink();
@@ -722,8 +987,12 @@ class _ReaderContent extends StatelessWidget {
                                             }
                                             return false;
                                           },
-                                          child: ListView.builder(
+                                          child: _ReaderIndexedScroll(
                                             controller: scrollController,
+                                            start: startIndex,
+                                            count:
+                                                parsedContent.length +
+                                                footer.length,
                                             padding: EdgeInsets.only(
                                               left: leftPadding,
                                               right: rightPadding,
@@ -731,10 +1000,7 @@ class _ReaderContent extends StatelessWidget {
                                               bottom:
                                                   bottomBarHeight + bottomPad,
                                             ),
-                                            itemCount:
-                                                parsedContent.length +
-                                                footer.length,
-                                            itemBuilder:
+                                            builder:
                                                 (context, index) =>
                                                     index < parsedContent.length
                                                         ? _buildContentWidget(
@@ -775,811 +1041,53 @@ class _ReaderContent extends StatelessWidget {
   }
 }
 
-class _ReaderSettings extends StatelessWidget {
+/// Jump directly to a variable-height item without measuring every preceding
+/// paragraph. Earlier content stays available above the new scroll origin.
+class _ReaderIndexedScroll extends StatelessWidget {
+  const _ReaderIndexedScroll({
+    required this.controller,
+    required this.start,
+    required this.count,
+    required this.padding,
+    required this.builder,
+  });
+  final ScrollController controller;
+  final int start, count;
+  final EdgeInsets padding;
+  final IndexedWidgetBuilder builder;
+
   @override
   Widget build(BuildContext context) {
-    final fontSizeCubit = context.read<FontSizeCubit>();
-    final paragraphSpacingCubit = context.read<ParagraphSpacingCubit>();
-    final lineHeightCubit = context.read<LineHeightCubit>();
-    final themeCubit = context.read<ThemeCubit>();
-    final topBarHeightCubit = context.read<TopBarHeightCubit>();
-    final bottomBarHeightCubit = context.read<BottomBarHeightCubit>();
-    final leftPaddingCubit = context.read<LeftPaddingCubit>();
-    final rightPaddingCubit = context.read<RightPaddingCubit>();
-    final readerTypeCubit = context.read<ReaderTypeCubit>();
-    final readerBackgroundCubit = context.read<ReaderBackgroundCubit>();
-    final autoScrollConfigCubit = context.read<AutoScrollConfigCubit>();
-
-    void showColorPicker(
-      BuildContext context,
-      Color initialColor,
-      Function(Color) onColorChanged,
-    ) {
-      showEinkAwareDialog(
-        context: context,
-        builder: (BuildContext context) {
-          Color pickerColor = initialColor;
-          return AlertDialog.adaptive(
-            title: const Text('选择颜色'),
-            content: SingleChildScrollView(
-              child: ColorPicker(
-                pickerColor: pickerColor,
-                onColorChanged: (Color color) {
-                  pickerColor = color;
-                },
-                pickerAreaHeightPercent: 0.8,
-                enableAlpha: false,
-                labelTypes: const [],
-                displayThumbColor: true,
-              ),
-            ),
-            actions: <Widget>[
-              AppButton.text(
-                child: const Text('取消'),
-                onPressed: () {
-                  Navigator.of(context).pop();
-                },
-              ),
-              AppButton.text(
-                child: const Text('确定'),
-                onPressed: () async {
-                  onColorChanged(pickerColor);
-                  Navigator.of(context).pop();
-                },
-              ),
-            ],
-          );
-        },
+    if (start == 0) {
+      return ListView.builder(
+        controller: controller,
+        padding: padding,
+        itemCount: count,
+        itemBuilder: builder,
       );
     }
-
-    return BlocBuilder<ThemeCubit, ReaderTheme>(
-      builder: (context, theme) {
-        return Container(
-          height: MediaQuery.of(context).size.height / 3 * 2,
-          padding: EdgeInsets.only(
-            left: 16,
-            right: 16,
-            top: 16,
-            bottom: MediaQuery.of(context).padding.bottom + 16,
+    const center = ValueKey('reader-scroll-target');
+    return CustomScrollView(
+      controller: controller,
+      center: center,
+      slivers: [
+        SliverPadding(
+          padding: padding.copyWith(bottom: 0),
+          sliver: SliverList.builder(
+            itemCount: start,
+            itemBuilder:
+                (context, index) => builder(context, start - index - 1),
           ),
-          decoration: BoxDecoration(
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+        ),
+        SliverPadding(
+          key: center,
+          padding: padding.copyWith(top: 0),
+          sliver: SliverList.builder(
+            itemCount: count - start,
+            itemBuilder: (context, index) => builder(context, start + index),
           ),
-          child: ListView(
-            children: [
-              Text(
-                '设置',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-              ),
-              const SizedBox(height: 16),
-              // 阅读器类型设置
-              Row(
-                children: [
-                  Text('阅读器类型'),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: BlocBuilder<ReaderTypeCubit, ReaderType>(
-                      builder: (context, type) {
-                        return AppSegmentedButton<ReaderType>(
-                          segments: const [
-                            ButtonSegment<ReaderType>(
-                              value: ReaderType.normal,
-                              label: Text('普通阅读器'),
-                              icon: Icon(Icons.book),
-                            ),
-                            ButtonSegment<ReaderType>(
-                              value: ReaderType.html,
-                              label: Text('HTML阅读器'),
-                              icon: Icon(Icons.html),
-                            ),
-                          ],
-                          selected: {type},
-                          onSelectionChanged: (Set<ReaderType> types) async {
-                            await readerTypeCubit.updateType(types.first);
-                          },
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              const Divider(),
-              const ReaderVolumeTurnSetting(),
-              const Divider(),
-              // 字体大小设置
-              BlocBuilder<FontSizeCubit, double>(
-                builder: (context, fontSize) {
-                  return Row(
-                    children: [
-                      Text('字体大小'),
-                      Expanded(
-                        child: AppSlider(
-                          value: fontSize,
-                          min: 14,
-                          max: 24,
-                          divisions: 10,
-                          label: fontSize.round().toString(),
-                          onChanged: (value) {
-                            fontSizeCubit.updateFontSize(value);
-                          },
-                        ),
-                      ),
-                      Text('${fontSize.round()}', style: TextStyle()),
-                    ],
-                  );
-                },
-              ),
-              // 段落间距设置
-              BlocBuilder<ParagraphSpacingCubit, double>(
-                builder: (context, spacing) {
-                  return Row(
-                    children: [
-                      Text('段落间距'),
-                      Expanded(
-                        child: AppSlider(
-                          value: spacing,
-                          min: 16,
-                          max: 32,
-                          divisions: 8,
-                          label: spacing.round().toString(),
-                          onChanged: (value) {
-                            paragraphSpacingCubit.updateSpacing(value);
-                          },
-                        ),
-                      ),
-                      Text('${spacing.round()}', style: TextStyle()),
-                    ],
-                  );
-                },
-              ),
-              // 行高设置
-              BlocBuilder<LineHeightCubit, double>(
-                builder: (context, lineHeight) {
-                  return Row(
-                    children: [
-                      Text('行高'),
-                      Expanded(
-                        child: AppSlider(
-                          value: lineHeight,
-                          min: 1.0,
-                          max: 2.0,
-                          divisions: 20,
-                          label: lineHeight.toStringAsFixed(1),
-                          onChanged: (value) {
-                            lineHeightCubit.updateLineHeight(value);
-                          },
-                        ),
-                      ),
-                      Text(lineHeight.toStringAsFixed(1), style: TextStyle()),
-                    ],
-                  );
-                },
-              ),
-              // 边距设置
-              BlocBuilder<TopBarHeightCubit, double>(
-                builder: (context, topBarHeight) {
-                  return BlocBuilder<BottomBarHeightCubit, double>(
-                    builder: (context, bottomBarHeight) {
-                      return BlocBuilder<LeftPaddingCubit, double>(
-                        builder: (context, leftPadding) {
-                          return BlocBuilder<RightPaddingCubit, double>(
-                            builder: (context, rightPadding) {
-                              return Column(
-                                children: [
-                                  Row(
-                                    children: [
-                                      Text('顶部边距'),
-                                      Expanded(
-                                        child: AppSlider(
-                                          value: topBarHeight,
-                                          min: 0,
-                                          max: 100,
-                                          divisions: 20,
-                                          label:
-                                              topBarHeight.round().toString(),
-                                          onChanged: (value) {
-                                            topBarHeightCubit.updateHeight(
-                                              value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                      Text(
-                                        '${topBarHeight.round()}',
-                                        style: TextStyle(),
-                                      ),
-                                    ],
-                                  ),
-                                  Row(
-                                    children: [
-                                      Text('底部边距'),
-                                      Expanded(
-                                        child: AppSlider(
-                                          value: bottomBarHeight,
-                                          min: 0,
-                                          max: 100,
-                                          divisions: 20,
-                                          label:
-                                              bottomBarHeight
-                                                  .round()
-                                                  .toString(),
-                                          onChanged: (value) {
-                                            bottomBarHeightCubit.updateHeight(
-                                              value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                      Text(
-                                        '${bottomBarHeight.round()}',
-                                        style: TextStyle(),
-                                      ),
-                                    ],
-                                  ),
-                                  Row(
-                                    children: [
-                                      Text('左边距'),
-                                      Expanded(
-                                        child: AppSlider(
-                                          value: leftPadding,
-                                          min: 0,
-                                          max: 50,
-                                          divisions: 25,
-                                          label: leftPadding.round().toString(),
-                                          onChanged: (value) {
-                                            leftPaddingCubit.updatePadding(
-                                              value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                      Text(
-                                        '${leftPadding.round()}',
-                                        style: TextStyle(),
-                                      ),
-                                    ],
-                                  ),
-                                  Row(
-                                    children: [
-                                      Text('右边距'),
-                                      Expanded(
-                                        child: AppSlider(
-                                          value: rightPadding,
-                                          min: 0,
-                                          max: 50,
-                                          divisions: 25,
-                                          label:
-                                              rightPadding.round().toString(),
-                                          onChanged: (value) {
-                                            rightPaddingCubit.updatePadding(
-                                              value,
-                                            );
-                                          },
-                                        ),
-                                      ),
-                                      Text(
-                                        '${rightPadding.round()}',
-                                        style: TextStyle(),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              );
-                            },
-                          );
-                        },
-                      );
-                    },
-                  );
-                },
-              ),
-              const Divider(),
-              // 主题模式选择
-              Row(
-                children: [
-                  Text('主题模式'),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: BlocBuilder<ThemeCubit, ReaderTheme>(
-                      builder: (context, theme) {
-                        return AppSegmentedButton<ReaderThemeMode>(
-                          segments: const [
-                            ButtonSegment<ReaderThemeMode>(
-                              value: ReaderThemeMode.auto,
-                              label: Text('自动'),
-                              icon: Icon(Icons.brightness_auto),
-                            ),
-                            ButtonSegment<ReaderThemeMode>(
-                              value: ReaderThemeMode.light,
-                              label: Text('浅色'),
-                              icon: Icon(Icons.light_mode),
-                            ),
-                            ButtonSegment<ReaderThemeMode>(
-                              value: ReaderThemeMode.dark,
-                              label: Text('深色'),
-                              icon: Icon(Icons.dark_mode),
-                            ),
-                          ],
-                          selected: {theme.themeMode},
-                          onSelectionChanged: (Set<ReaderThemeMode> modes) {
-                            themeCubit.setThemeMode(modes.first);
-                          },
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              // 浅色主题颜色设置
-              Row(
-                children: [
-                  Text('浅色主题', style: TextStyle(fontWeight: FontWeight.bold)),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: BlocBuilder<ThemeCubit, ReaderTheme>(
-                      builder: (context, theme) {
-                        return AppButton.outlinedIcon(
-                          icon: Container(
-                            width: 24,
-                            height: 24,
-                            decoration: BoxDecoration(
-                              color: theme.lightBackgroundColor,
-                              border: Border.all(color: Colors.grey),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          label: const Text('背景颜色'),
-                          onPressed:
-                              () => showColorPicker(
-                                context,
-                                theme.lightBackgroundColor,
-                                (color) {
-                                  themeCubit.updateLightBackgroundColor(color);
-                                },
-                              ),
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: BlocBuilder<ThemeCubit, ReaderTheme>(
-                      builder: (context, theme) {
-                        return AppButton.outlinedIcon(
-                          icon: Container(
-                            width: 24,
-                            height: 24,
-                            decoration: BoxDecoration(
-                              color: theme.lightTextColor,
-                              border: Border.all(color: Colors.grey),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          label: const Text('文字颜色'),
-                          onPressed:
-                              () => showColorPicker(
-                                context,
-                                theme.lightTextColor,
-                                (color) {
-                                  themeCubit.updateLightTextColor(color);
-                                },
-                              ),
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              // 深色主题颜色设置
-              Row(
-                children: [
-                  Text('深色主题', style: TextStyle(fontWeight: FontWeight.bold)),
-                ],
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: BlocBuilder<ThemeCubit, ReaderTheme>(
-                      builder: (context, theme) {
-                        return AppButton.outlinedIcon(
-                          icon: Container(
-                            width: 24,
-                            height: 24,
-                            decoration: BoxDecoration(
-                              color: theme.darkBackgroundColor,
-                              border: Border.all(color: Colors.grey),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          label: const Text('背景颜色'),
-                          onPressed:
-                              () => showColorPicker(
-                                context,
-                                theme.darkBackgroundColor,
-                                (color) {
-                                  themeCubit.updateDarkBackgroundColor(color);
-                                },
-                              ),
-                        );
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: BlocBuilder<ThemeCubit, ReaderTheme>(
-                      builder: (context, theme) {
-                        return AppButton.outlinedIcon(
-                          icon: Container(
-                            width: 24,
-                            height: 24,
-                            decoration: BoxDecoration(
-                              color: theme.darkTextColor,
-                              border: Border.all(color: Colors.grey),
-                              shape: BoxShape.circle,
-                            ),
-                          ),
-                          label: const Text('文字颜色'),
-                          onPressed:
-                              () => showColorPicker(
-                                context,
-                                theme.darkTextColor,
-                                (color) {
-                                  themeCubit.updateDarkTextColor(color);
-                                },
-                              ),
-                        );
-                      },
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              // 自动滚动设置
-              Row(
-                children: [
-                  Text('自动滚动设置', style: TextStyle(fontWeight: FontWeight.bold)),
-                ],
-              ),
-              const SizedBox(height: 8),
-              // 滚动速度设置
-              BlocBuilder<AutoScrollConfigCubit, AutoScrollConfig>(
-                builder: (context, config) {
-                  return Row(
-                    children: [
-                      Text('滚动速度'),
-                      Expanded(
-                        child: AppSlider(
-                          value: config.scrollSpeed,
-                          min: 0.5,
-                          max: 3.0,
-                          divisions: 10,
-                          label: config.scrollSpeed.toStringAsFixed(1),
-                          onChanged: (value) {
-                            autoScrollConfigCubit.updateScrollSpeed(value);
-                          },
-                        ),
-                      ),
-                      Text(
-                        config.scrollSpeed.toStringAsFixed(1),
-                        style: TextStyle(),
-                      ),
-                    ],
-                  );
-                },
-              ),
-              // 滚动间隔设置
-              BlocBuilder<AutoScrollConfigCubit, AutoScrollConfig>(
-                builder: (context, config) {
-                  return Row(
-                    children: [
-                      Text('滚动间隔'),
-                      Expanded(
-                        child: AppSlider(
-                          value: config.scrollInterval.toDouble(),
-                          min: 8,
-                          max: 32,
-                          divisions: 6,
-                          label: '${config.scrollInterval}ms',
-                          onChanged: (value) {
-                            autoScrollConfigCubit.updateScrollInterval(
-                              value.toInt(),
-                            );
-                          },
-                        ),
-                      ),
-                      Text('${config.scrollInterval}ms', style: TextStyle()),
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 16),
-              // 背景透明度设置
-              BlocBuilder<ReaderBackgroundCubit, ReaderBackgroundState>(
-                builder: (context, backgroundState) {
-                  return Row(
-                    children: [
-                      Text('背景透明度'),
-                      Expanded(
-                        child: AppSlider(
-                          value: backgroundState.opacity,
-                          min: 0.0,
-                          max: 1.0,
-                          divisions: 25,
-                          label: '${(backgroundState.opacity * 100).round()}%',
-                          onChanged: (value) async {
-                            await readerBackgroundCubit.updateOpacity(value);
-                          },
-                        ),
-                      ),
-                      Text(
-                        '${(backgroundState.opacity * 100).round()}%',
-                        style: TextStyle(),
-                      ),
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 16),
-              // 背景图片设置
-              Row(
-                children: [
-                  Text('背景图片设置', style: TextStyle(fontWeight: FontWeight.bold)),
-                ],
-              ),
-              const SizedBox(height: 8),
-              BlocBuilder<ReaderBackgroundCubit, ReaderBackgroundState>(
-                builder: (context, backgroundState) {
-                  return Column(
-                    children: [
-                      Row(
-                        children: [
-                          Expanded(
-                            child: AppButton.outlinedIcon(
-                              icon: Icon(
-                                backgroundState.lightBackgroundExists
-                                    ? Icons.image
-                                    : Icons.add_photo_alternate,
-                              ),
-                              label: Text(
-                                backgroundState.lightBackgroundExists
-                                    ? '更新浅色背景'
-                                    : '设置浅色背景',
-                              ),
-                              onPressed: () async {
-                                await readerBackgroundCubit
-                                    .updateLightBackground();
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          if (backgroundState.lightBackgroundExists)
-                            AppButton.outlinedIcon(
-                              icon: const Icon(Icons.delete),
-                              label: const Text('删除'),
-                              onPressed: () async {
-                                await readerBackgroundCubit
-                                    .deleteLightBackground();
-                              },
-                            ),
-                        ],
-                      ),
-                      const SizedBox(height: 8),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: AppButton.outlinedIcon(
-                              icon: Icon(
-                                backgroundState.darkBackgroundExists
-                                    ? Icons.image
-                                    : Icons.add_photo_alternate,
-                              ),
-                              label: Text(
-                                backgroundState.darkBackgroundExists
-                                    ? '更新深色背景'
-                                    : '设置深色背景',
-                              ),
-                              onPressed: () async {
-                                await readerBackgroundCubit
-                                    .updateDarkBackground();
-                              },
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          if (backgroundState.darkBackgroundExists)
-                            AppButton.outlinedIcon(
-                              icon: const Icon(Icons.delete),
-                              label: const Text('删除'),
-                              onPressed: () async {
-                                await readerBackgroundCubit
-                                    .deleteDarkBackground();
-                              },
-                            ),
-                        ],
-                      ),
-                    ],
-                  );
-                },
-              ),
-              const SizedBox(height: 16),
-              // 重置按钮
-              AppButton.text(
-                onPressed: () async {
-                  await themeCubit.resetToDefault();
-                  await topBarHeightCubit.updateHeight(56);
-                  await bottomBarHeightCubit.updateHeight(56);
-                  await leftPaddingCubit.updatePadding(16);
-                  await rightPaddingCubit.updatePadding(16);
-                },
-                child: const Text('重置为默认'),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-}
-
-class _ChapterList extends StatefulWidget {
-  final List<Volume> volumes;
-  final String currentAid;
-  final String currentCid;
-  final Function(String aid, String cid) onChapterSelected;
-
-  const _ChapterList({
-    required this.volumes,
-    required this.currentAid,
-    required this.currentCid,
-    required this.onChapterSelected,
-  });
-
-  @override
-  State<_ChapterList> createState() => _ChapterListState();
-}
-
-class _ChapterListState extends State<_ChapterList> {
-  late ScrollController _scrollController;
-  int _currentChapterGlobalIndex = 0;
-
-  @override
-  void initState() {
-    super.initState();
-    _scrollController = ScrollController();
-    _currentChapterGlobalIndex = _calculateCurrentChapterIndex();
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollController.hasClients) {
-        const estimatedItemHeight = 56.0;
-        const estimatedVolumeTitleHeight = 48.0;
-        const estimatedSpacing = 16.0;
-
-        double targetScroll =
-            _currentChapterGlobalIndex *
-            (estimatedItemHeight + estimatedSpacing);
-        for (var i = 0; i < widget.volumes.length; i++) {
-          if (i < _findCurrentVolumeIndex()) {
-            targetScroll += estimatedVolumeTitleHeight + estimatedSpacing;
-          } else {
-            break;
-          }
-        }
-
-        _scrollController.jumpTo(
-          (targetScroll - 100)
-              .clamp(
-                _scrollController.position.minScrollExtent,
-                _scrollController.position.maxScrollExtent,
-              )
-              .toDouble(),
-        );
-      }
-    });
-  }
-
-  @override
-  void dispose() {
-    _scrollController.dispose();
-    super.dispose();
-  }
-
-  int _findCurrentVolumeIndex() {
-    for (var i = 0; i < widget.volumes.length; i++) {
-      final volume = widget.volumes[i];
-      if (volume.chapters.any(
-        (chapter) =>
-            chapter.aid == widget.currentAid &&
-            chapter.cid == widget.currentCid,
-      )) {
-        return i;
-      }
-    }
-    return -1;
-  }
-
-  int _calculateCurrentChapterIndex() {
-    int globalIndex = 0;
-    for (var volume in widget.volumes) {
-      for (var chapter in volume.chapters) {
-        if (chapter.aid == widget.currentAid &&
-            chapter.cid == widget.currentCid) {
-          return globalIndex;
-        }
-        globalIndex++;
-      }
-    }
-    return 0;
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.of(context).size.height * 0.8,
-      ),
-      child: Column(
-        children: [
-          AppBar(
-            title: const Text('目录'),
-            automaticallyImplyLeading: false,
-            actions: [
-              AppIconButton(
-                icon: const Icon(Icons.close),
-                onPressed: () => Navigator.pop(context),
-              ),
-            ],
-          ),
-          Expanded(
-            child: ListView.builder(
-              controller: _scrollController,
-              itemCount: widget.volumes.length,
-              itemBuilder: (context, volumeIndex) {
-                final volume = widget.volumes[volumeIndex];
-                return Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Text(
-                        volume.title,
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                    ),
-                    ...volume.chapters.map((chapter) {
-                      final isSelected =
-                          chapter.aid == widget.currentAid &&
-                          chapter.cid == widget.currentCid;
-                      return ListTile(
-                        title: Text(
-                          chapter.title,
-                          style: TextStyle(
-                            color:
-                                isSelected
-                                    ? Theme.of(context).colorScheme.primary
-                                    : null,
-                          ),
-                        ),
-                        selected: isSelected,
-                        onTap:
-                            () => widget.onChapterSelected(
-                              chapter.aid,
-                              chapter.cid,
-                            ),
-                      );
-                    }),
-                  ],
-                );
-              },
-            ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 }

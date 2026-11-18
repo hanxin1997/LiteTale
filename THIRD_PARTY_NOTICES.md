@@ -14,6 +14,8 @@ LiteTale 使用 Flutter 与自己的存储、阅读器、书源和更新接口�
 
 ## Novella 与轻书架
 
+1.2.0 封面首显的显示记录、预览保留及交叉渐变行为参照 Novella 固定提交 `bedd62c5a20aa80e9bf922b33ea12887d991aa8a` 的 `apps/mobile/src/components/book-cover-image.tsx`，按 LiteTale 的 Flutter ImageStream、实际绘制、书源隔离与缓存独立适配。iOS 的200ms ease-in-out 对照 Expo Image `expo-image@58.0.16` 的 UIKit transition 配置；Expo 版权归650 Industries，MIT许可见 `LICENSES/Expo-MIT.txt`。Novella 原作者与贡献者版权及仓库AGPL-3.0许可保留。未引入其账号或服务端接口。
+
 Windows 应用图标取自 [celia-sh/Novella](https://github.com/celia-sh/Novella) 仓库中的 `apps/mobile/assets/icon.png`。该仓库按 GNU Affero General Public License v3.0 发布，许可文本见 [LICENSES/AGPL-3.0.txt](LICENSES/AGPL-3.0.txt)。
 
 轻书架接入参考了 Novella 的 `archive/flutter` 分支和 LightNovelShelf/Web 公布的接口约定。网络客户端使用 Dart WebSocket 与 HTTP 独立实现；0.0.18 增加原生登录、搜索、目录和阅读适配。登录遵循官方表单的密码 SHA-256 协议。匿名首页仅调用 `GetLatestBookList`，受限接口仍按站点要求登录。
@@ -33,6 +35,14 @@ Android 集成测试包含上述字体的少量字符 WOFF2 子集，仅用于�
 ## Material 形状
 
 加载指示器使用 [`material_new_shapes`](https://pub.dev/packages/material_new_shapes) 1.0.0 的 Flutter 多边形与 Morph 几何实现，许可为 MIT；版权归 2025 Agbama Gifted，许可文本见 [LICENSES/material_new_shapes-MIT.txt](LICENSES/material_new_shapes-MIT.txt)。形状顺序参考 AndroidX Material 3 的公开实现，应用中的加载组件由本项目实现。
+
+## 书架图标
+
+iOS 书架使用 [Tabler Icons v3.30.0](https://github.com/tabler/tabler-icons/tree/v3.30.0) 的文件夹、书本、勾选及首页轮廓。版权归 2020–2024 Paweł Kuna，许可文本见 [LICENSES/tabler-icons-MIT.txt](LICENSES/tabler-icons-MIT.txt)。
+
+## 听书
+
+在线音色使用 Moosphan 维护的 Flutter Edge TTS，固定提交为 `a06632a85255916ffacb21543a36c77026a2f950`。该库以 MIT 许可发布，其中源自 rany2/edge-tts 的实现按 LGPL-3.0-or-later 使用。依赖源码保留原版权和许可。 [Flutter Edge TTS 许可声明](https://github.com/Moosphan/flutter_edge_tts/blob/a06632a85255916ffacb21543a36c77026a2f950/NOTICE)
 
 ## EPUB 参考与依赖
 

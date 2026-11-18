@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:wild/services/wenku8_browser.dart';
@@ -17,7 +18,7 @@ import 'local_epub_source.dart';
 import 'huanmeng_source.dart';
 import 'esj_source.dart';
 import 'package:flutter/foundation.dart'
-    show defaultTargetPlatform, TargetPlatform;
+    show defaultTargetPlatform, TargetPlatform, ValueNotifier;
 import 'package:wild/services/huanmeng_http_transport.dart';
 import 'package:wild/services/epub/local_epub_library.dart';
 import 'package:wild/services/reading_progress.dart';
@@ -28,6 +29,10 @@ import 'package:wild/services/bounded_detail_cache.dart';
 import 'package:wild/services/read_diagnostics.dart';
 import 'package:wild/services/read_request.dart';
 import 'package:wild/services/read_result_cache.dart';
+import 'package:wild/models/bookshelf_unread.dart';
+import 'package:wild/models/source_comment.dart';
+import 'package:wild/services/book_comments_repository.dart';
+import 'comment_parsers.dart' show commentText;
 
 export 'package:wild/src/rust/api/wenku8.dart'
     hide
@@ -57,14 +62,14 @@ export 'package:wild/src/rust/api/wenku8.dart'
         logout;
 
 final _wenkuBrowser = Wenku8BrowserSession.instance;
-int _wenkuSessionGeneration = 0;
+final wenku8ShelfRevision = ValueNotifier<int>(0);
 
 void invalidateWenku8ReadingCache() {
-  _wenkuSessionGeneration++;
   _wenkuBrowser.invalidateBookshelfSnapshot();
   final source = bookSources[SourceId.wenku8];
   if (source is Wenku8Source) source._reads.clear();
   _detailCache.removeWhere((key, _) => sourceOf(key.$1) == SourceId.wenku8);
+  wenku8ShelfRevision.value++;
 }
 
 Future<void> cleanAllWebCache() async {
@@ -74,12 +79,12 @@ Future<void> cleanAllWebCache() async {
 
 /// Account identity for an opened book; changing discovery alone is unrelated.
 int readerSessionGeneration(String aid) =>
-    sourceOf(aid) == SourceId.localEpub
+    supportsLocalEpub && sourceOf(aid) == SourceId.localEpub
         ? LocalEpubLibrary.instance.revisionFor(aid)
         : sourceOf(aid) == SourceId.lightNovelShelf
         ? ShelfSession.instance.generation
         : sourceOf(aid) == SourceId.wenku8
-        ? _wenkuSessionGeneration + _wenkuBrowser.readingSessionRevision
+        ? wenku8ShelfRevision.value + _wenkuBrowser.readingSessionRevision
         : sourceOf(aid) == SourceId.bili
         ? sourceRevision.value
         : sourceOf(aid).isRule
@@ -142,13 +147,33 @@ void _wenkuId(String id) {
 }
 
 Future<List<TagGroup>> tags() => _wenkuBrowser.nativeOrBrowser(
-  w8.tags,
+  () async {
+    final groups = await w8.tags();
+    if (groups.isEmpty) {
+      throw const Wenku8CatalogFormatException('文库8分类列表为空。');
+    }
+    return groups;
+  },
   () => _wenkuRead(
     'tags',
     '/modules/article/tags.php',
     query: {'charset': 'gbk'},
   ),
 );
+
+Future<w8.PageStatsNovelCover> _wenkuCatalog(
+  Future<w8.PageStatsNovelCover> Function() native,
+  Future<w8.PageStatsNovelCover> Function() browser,
+) => _wenkuBrowser.nativeOrBrowser(() async {
+  final value = await native();
+  if (value.currentPage < 1 ||
+      value.maxPage < value.currentPage ||
+      (value.records.isEmpty &&
+          (value.currentPage != 1 || value.maxPage != 1))) {
+    throw const Wenku8CatalogFormatException('文库8未返回有效的书目页码。');
+  }
+  return value;
+}, browser);
 
 Future<w8.PageStatsNovelCover> _wenkuEncodedList(
   String path,
@@ -167,7 +192,7 @@ Future<w8.PageStatsNovelCover> tagPage({
   required String tag,
   required String v,
   required int pageNumber,
-}) => _wenkuBrowser.nativeOrBrowser(
+}) => _wenkuCatalog(
   () => w8.tagPage(tag: tag, v: v, pageNumber: pageNumber),
   () async => _wenkuEncodedList(
     '/modules/article/tags.php',
@@ -178,7 +203,7 @@ Future<w8.PageStatsNovelCover> tagPage({
 Future<w8.PageStatsNovelCover> toplist({
   required String sort,
   required int page,
-}) => _wenkuBrowser.nativeOrBrowser(
+}) => _wenkuCatalog(
   () => w8.toplist(sort: sort, page: page),
   () => _wenkuRead(
     'list',
@@ -190,7 +215,7 @@ Future<w8.PageStatsNovelCover> toplist({
 Future<w8.PageStatsNovelCover> articlelist({
   required int fullflag,
   required int page,
-}) => _wenkuBrowser.nativeOrBrowser(
+}) => _wenkuCatalog(
   () => w8.articlelist(fullflag: fullflag, page: page),
   () => _wenkuRead(
     'list',
@@ -199,7 +224,7 @@ Future<w8.PageStatsNovelCover> articlelist({
   ),
 );
 
-class Wenku8Source implements BookSource {
+class Wenku8Source implements BookSource, BookCommentsSource {
   late final _reads = Wenku8ReadRepository(
     host: _wenkuBrowser.apiHost,
     session: () => readerSessionGeneration('1'),
@@ -222,6 +247,48 @@ class Wenku8Source implements BookSource {
 
   @override
   SourceId get id => SourceId.wenku8;
+  @override
+  bool get supportsComments => true;
+  @override
+  List<CommentFeed> get commentFeeds => const [CommentFeed.comments];
+  @override
+  Future<SourceCommentPage> comments(
+    String bookId, {
+    int page = 1,
+    CommentFeed feed = CommentFeed.comments,
+    String? threadId,
+  }) async {
+    _wenkuId(bookId);
+    validateCommentPage(page);
+    if (threadId != null || feed != CommentFeed.comments) {
+      throw const SourceCommentException('文库8评论请求无效');
+    }
+    final result = await _wenkuBrowser.nativeOrBrowser(
+      () => w8.reviews(aid: bookId, pageNumber: page),
+      () => _wenkuRead<w8.PageStatsReviews>(
+        'reviews',
+        '/modules/article/reviews.php',
+        aid: bookId,
+        query: {'aid': bookId, 'page': '$page', 'charset': 'gbk'},
+      ),
+    );
+    return SourceCommentPage(
+      page: result.currentPage,
+      hasMore: result.currentPage < result.maxPage,
+      items: List.unmodifiable(
+        result.records.map(
+          (review) => SourceComment(
+            id: review.rid,
+            author: commentText(review.uname),
+            content: commentText(review.content),
+            time: commentText(review.time),
+            replyCount: review.replyCount,
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Future<List<HomeBlock>> discover() =>
       _wenkuBrowser.nativeOrBrowser(w8.index, _wenkuBrowser.home);
@@ -310,12 +377,67 @@ final Map<SourceId, BookSource> bookSources = {
   SourceId.lnovel: lnovelSource,
   SourceId.bili: biliSource,
   SourceId.esj: esjSource,
-  SourceId.localEpub: LocalEpubSource(),
+  if (supportsLocalEpub) SourceId.localEpub: LocalEpubSource(),
   SourceId.huanmeng: huanmengSource,
 };
 
-BookSource sourceAdapter(SourceId source) =>
-    bookSources[source] ?? (throw StateError('此书源已停用或移除。请在“书源与账号”中恢复或重新导入。'));
+BookSource sourceAdapter(SourceId source) {
+  if (!supportsLocalEpub && source == SourceId.localEpub) {
+    throw UnsupportedError('此设备无法打开本地 EPUB');
+  }
+  return bookSources[source] ??
+      (throw StateError('此书源已停用或移除。请在“书源与账号”中恢复或重新导入。'));
+}
+
+bool sourceSupportsComments(String bookId) {
+  final adapter = bookSources[sourceOf(bookId)];
+  return adapter is BookCommentsSource &&
+      (adapter as BookCommentsSource).supportsComments;
+}
+
+List<CommentFeed> sourceCommentFeeds(String bookId) {
+  final adapter = sourceAdapter(sourceOf(bookId));
+  return adapter is BookCommentsSource &&
+          (adapter as BookCommentsSource).supportsComments
+      ? (adapter as BookCommentsSource).commentFeeds
+      : const [];
+}
+
+final _comments = BookCommentsRepository(
+  generation: readerSessionGeneration,
+  loader: (
+    bookId, {
+    int page = 1,
+    CommentFeed feed = CommentFeed.comments,
+    String? threadId,
+  }) {
+    final adapter = sourceAdapter(sourceOf(bookId));
+    if (adapter is! BookCommentsSource ||
+        !(adapter as BookCommentsSource).supportsComments) {
+      throw const SourceCommentException('该书源目前没有可读取的原站评论区');
+    }
+    return (adapter as BookCommentsSource).comments(
+      bookId,
+      page: page,
+      feed: feed,
+      threadId: threadId,
+    );
+  },
+);
+
+Future<SourceCommentPage> loadBookComments(
+  String bookId, {
+  int page = 1,
+  CommentFeed feed = CommentFeed.comments,
+  String? threadId,
+  bool refresh = false,
+}) => _comments.load(
+  bookId,
+  page: page,
+  feed: feed,
+  threadId: threadId,
+  refresh: refresh,
+);
 bool sourceUsesCatalogSearch(SourceId source) =>
     source == SourceId.lnovel ||
     (bookSources[source] is RuleBookSource &&
@@ -381,11 +503,8 @@ final _chapterCache = ReadResultCache<(String, String, int), SourceChapter>(
   cacheable: (chapter) => chapter.content.trim().isNotEmpty,
 );
 final _chapterFonts = <String, String?>{};
-final _shelfCovers = <String, String>{};
 String coverForBook(String aid) =>
-    _detailCache.peek((aid, readerSessionGeneration(aid)))?.info.imgUrl ??
-    _shelfCovers[aid] ??
-    '';
+    _detailCache.peek((aid, readerSessionGeneration(aid)))?.info.imgUrl ?? '';
 String? chapterFont(String aid, String cid) => _chapterFonts['$aid/$cid'];
 Future<void> _writes = Future.value();
 
@@ -561,7 +680,7 @@ Future<void> prefetchReaderChapter({
   required String cid,
   required bool Function() isCurrent,
 }) async {
-  if (isCurrent() && sourceOf(aid) == SourceId.localEpub) {
+  if (supportsLocalEpub && isCurrent() && sourceOf(aid) == SourceId.localEpub) {
     await LocalEpubLibrary.instance.chapter(aid, cid);
     return;
   }
@@ -584,28 +703,32 @@ Future<w8.PageStatsNovelCover> search({
   required int page,
 }) async {
   final source = activeSource.value;
+  ReadRequest.current?.check();
   if (page == 1) {
-    await ReadDiagnostics.measure(
-      source.name,
-      'search_history',
-      () => _serial(() async {
-        final history = await _jsonList(_searchKey(source));
-        history.removeWhere(
-          (h) => h['key'] == searchKey && h['type'] == searchType,
-        );
-        history.insert(0, {
-          'key': searchKey,
-          'type': searchType,
-          'time': DateTime.now().millisecondsSinceEpoch ~/ 1000,
-        });
-        await db.saveProperty(
-          key: _searchKey(source),
-          value: jsonEncode(history.take(100).toList()),
-        );
+    unawaited(
+      ReadDiagnostics.measure(
+        source.name,
+        'search_history',
+        () => _serial(() async {
+          final history = await _jsonList(_searchKey(source));
+          history.removeWhere(
+            (h) => h['key'] == searchKey && h['type'] == searchType,
+          );
+          history.insert(0, {
+            'key': searchKey,
+            'type': searchType,
+            'time': DateTime.now().millisecondsSinceEpoch ~/ 1000,
+          });
+          await db.saveProperty(
+            key: _searchKey(source),
+            value: jsonEncode(history.take(100).toList()),
+          );
+        }),
+      ).catchError((Object _) {
+        // A failed history write does not prevent the website search.
       }),
     );
   }
-  ReadRequest.current?.check();
   return ReadDiagnostics.measure(
     source.name,
     'search',
@@ -655,8 +778,11 @@ Future<List<w8.ReadingHistory>> listReadingHistory({
   required int limit,
   SourceId? source,
 }) async {
-  await ReadingProgressQueue.instance.flushBounded();
   final selectedSource = source ?? activeSource.value;
+  if (!supportsLocalEpub && selectedSource == SourceId.localEpub) {
+    return const [];
+  }
+  await ReadingProgressQueue.instance.flushBounded();
   final selected = <w8.ReadingHistory>[];
   for (var start = 0; selected.length < offset + limit; start += 100) {
     final chunk = await w8.listReadingHistory(offset: start, limit: 100);
@@ -665,7 +791,8 @@ Future<List<w8.ReadingHistory>> listReadingHistory({
         (h) =>
             sourceOf(h.novelId) == selectedSource &&
             (selectedSource != SourceId.localEpub ||
-                LocalEpubLibrary.instance.contains(h.novelId)),
+                (supportsLocalEpub &&
+                    LocalEpubLibrary.instance.contains(h.novelId))),
       ),
     );
     if (chunk.length < 100) break;
@@ -709,52 +836,141 @@ Future<void> _serial(Future<void> Function() work) {
   return next;
 }
 
-Future<List<Bookcase>> bookcaseList() async =>
-    activeSource.value == SourceId.wenku8
-        ? _wenkuBrowser.nativeOrBrowser(
-          w8.bookcaseList,
-          _wenkuBrowser.bookcaseList,
-        )
-        : [
-          Bookcase(
-            id: _caseId(activeSource.value),
-            title: '${activeSource.value.label}收藏',
-          ),
-        ];
+Future<List<Bookcase>> bookcaseList({SourceId? source}) async {
+  final selected = source ?? activeSource.value;
+  return selected == SourceId.wenku8
+      ? _wenkuBrowser.nativeOrBrowser(
+        w8.bookcaseList,
+        _wenkuBrowser.bookcaseList,
+      )
+      : [Bookcase(id: _caseId(selected), title: '${selected.label}收藏')];
+}
+
+typedef LocalShelfEntry = ({BookcaseItem book, String coverUrl});
+
+Iterable<SourceId> get localShelfSources => SourceId.values.where(
+  (source) =>
+      source != SourceId.wenku8 &&
+      source != SourceId.localEpub &&
+      bookSources.containsKey(source),
+);
+
+Future<List<LocalShelfEntry>> loadLocalShelf(SourceId source) async {
+  final entries = await _jsonList(_shelfKeyFor(source));
+  final books = <LocalShelfEntry>[];
+  final seen = <String>{};
+  for (final entry in entries) {
+    final id = entry['id'], title = entry['title'];
+    if (id is! String || title is! String || id.isEmpty) continue;
+    try {
+      if (sourceOf(id) != source || !seen.add(id)) continue;
+    } on FormatException {
+      continue;
+    }
+    books.add((
+      book: BookcaseItem(
+        aid: id,
+        bid: id,
+        title: title,
+        author: entry['author'] as String? ?? '',
+        cid: entry['cid'] as String? ?? '',
+        chapterName: entry['chapter'] as String? ?? '',
+      ),
+      coverUrl: entry['cover'] as String? ?? '',
+    ));
+  }
+  return List.unmodifiable(books);
+}
+
+final _wenku8ShelfId = RegExp(r'^\d{1,12}$');
+
+Future<BookcaseDto> wenku8BookInCase({required String caseId}) async {
+  if (!_wenku8ShelfId.hasMatch(caseId)) {
+    throw const FormatException('文库8书架分组无效。');
+  }
+  final content = await _wenkuBrowser.nativeOrBrowser(
+    () => w8.bookInCase(caseId: caseId),
+    () => _wenkuBrowser.bookInCase(caseId),
+  );
+  final seen = <String>{};
+  return BookcaseDto(
+    tip: content.tip,
+    items: List.unmodifiable(
+      content.items.where(
+        (book) =>
+            _wenku8ShelfId.hasMatch(book.aid) &&
+            _wenku8ShelfId.hasMatch(book.bid) &&
+            seen.add(book.aid),
+      ),
+    ),
+  );
+}
+
 Future<BookcaseDto> bookInCase({required String caseId}) async {
-  final source =
+  final localSource =
       SourceId.values
           .where((s) => s != SourceId.wenku8 && _caseId(s) == caseId)
           .firstOrNull;
-  if (source == null && caseId.startsWith('rule:')) {
+  if (localSource == null && caseId.startsWith('rule:')) {
     throw StateError('此书源已移除，请重新导入相同书源。');
   }
-  if (source == null) {
-    return _wenkuBrowser.nativeOrBrowser(
-      () => w8.bookInCase(caseId: caseId),
-      () => _wenkuBrowser.bookInCase(caseId),
-    );
+  if (localSource == null) {
+    return wenku8BookInCase(caseId: caseId);
   }
-  final entries = await _jsonList(_shelfKeyFor(source));
-  for (final book in entries) {
-    _shelfCovers[book['id'] as String] = book['cover'] as String? ?? '';
-  }
+  final entries = await loadLocalShelf(localSource);
   return BookcaseDto(
     tip: '收藏保存在本机，阅读记录独立保存',
-    items:
-        entries
-            .map(
-              (b) => BookcaseItem(
-                aid: b['id'],
-                bid: b['id'],
-                title: b['title'],
-                author: b['author'],
-                cid: b['cid'],
-                chapterName: b['chapter'],
-              ),
-            )
-            .toList(),
+    items: entries.map((entry) => entry.book).toList(),
   );
+}
+
+/// Only read progress for books with a directory in the existing bounded cache.
+/// A shelf refresh never fetches a book's detail or chapter list.
+Future<Map<String, int>> loadShelfUnreadCounts(Iterable<String> bookIds) async {
+  final catalogs = <String, (int, SourceBookDetail)>{};
+  for (final id in bookIds.toSet()) {
+    final source = sourceOf(id);
+    if (source.isRule || source == SourceId.localEpub) continue;
+    final generation = readerSessionGeneration(id);
+    final detail = _detailCache.peek((id, generation));
+    if (detail != null) catalogs[id] = (generation, detail);
+  }
+  if (catalogs.isEmpty) return const {};
+  final progress = ReadingProgressQueue.instance;
+  try {
+    await progress.flush().timeout(const Duration(seconds: 2));
+  } on TimeoutException {
+    return const {};
+  }
+  final clock = Stopwatch()..start();
+  const budget = Duration(seconds: 2);
+  final counts = <String, int>{};
+  for (final entry in catalogs.entries) {
+    final remaining = budget - clock.elapsed;
+    if (remaining <= Duration.zero) break;
+    final (generation, detail) = entry.value;
+    final id = entry.key;
+    if (generation != readerSessionGeneration(id) ||
+        progress.errorFor(id) != null) {
+      continue;
+    }
+    try {
+      final history = await w8.novelHistoryById(novelId: id).timeout(remaining);
+      if (generation != readerSessionGeneration(id) ||
+          !identical(_detailCache.peek((id, generation)), detail)) {
+        continue;
+      }
+      final count = unreadChapters(detail.volumes, id, history?.chapterId);
+      if (count != null && count > 0) counts[id] = count;
+    } catch (_) {
+      // Unavailable progress is different from a book with no progress.
+    }
+  }
+  return counts..removeWhere((id, _) {
+    final (generation, detail) = catalogs[id]!;
+    return generation != readerSessionGeneration(id) ||
+        !identical(_detailCache.peek((id, generation)), detail);
+  });
 }
 
 Future<void> addBookshelf({required String aid}) async {
@@ -780,12 +996,24 @@ Future<void> addBookshelf({required String aid}) async {
 }
 
 Future<void> deleteBookcase({required String bid}) async {
-  if (sourceOf(bid) == SourceId.localEpub) return removeLocalEpub(bid);
+  if (sourceOf(bid) == SourceId.localEpub) {
+    if (supportsLocalEpub) await removeLocalEpub(bid);
+    return;
+  }
   if (sourceOf(bid) == SourceId.wenku8) return w8.deleteBookcase(bid: bid);
-  final shelfKey = _shelfKeyFor(sourceOf(bid));
-  await _serial(() async {
+  return deleteLocalShelfBooks(sourceOf(bid), {bid});
+}
+
+Future<void> deleteLocalShelfBooks(SourceId source, Set<String> ids) {
+  if (source == SourceId.wenku8 ||
+      source == SourceId.localEpub ||
+      ids.any((id) => sourceOf(id) != source)) {
+    throw ArgumentError('收藏与书源不匹配');
+  }
+  final shelfKey = _shelfKeyFor(source);
+  return _serial(() async {
     final items = await _jsonList(shelfKey);
-    items.removeWhere((b) => b['id'] == bid);
+    items.removeWhere((b) => ids.contains(b['id']));
     await db.saveProperty(key: shelfKey, value: jsonEncode(items));
   });
 }
@@ -824,7 +1052,6 @@ Future<void> removeLocalEpub(String bookId) async {
   } finally {
     _detailCache.removeWhere((key, _) => key.$1 == bookId);
     _chapterFonts.removeWhere((key, _) => key.startsWith('$bookId/'));
-    _shelfCovers.remove(bookId);
     ReaderPaginationCache.instance.evictBook(bookId);
   }
 }
@@ -833,6 +1060,5 @@ void invalidateLocalEpubPresentation(String bookId) {
   if (sourceOf(bookId) != SourceId.localEpub) return;
   _detailCache.removeWhere((key, _) => key.$1 == bookId);
   _chapterFonts.removeWhere((key, _) => key.startsWith('$bookId/'));
-  _shelfCovers.remove(bookId);
   ReaderPaginationCache.instance.evictBook(bookId);
 }

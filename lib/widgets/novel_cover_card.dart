@@ -3,7 +3,9 @@ import 'apple_book_cover.dart';
 import 'package:wild/theme/material_you.dart';
 import 'package:wild/sources/book_source.dart';
 import 'package:wild/src/rust/wenku8/models.dart';
-import 'package:wild/widgets/cached_image.dart';
+import 'package:wild/widgets/book_cover_image.dart';
+import 'package:wild/models/book_detail_hint.dart';
+import 'book_card_ink.dart';
 
 class NovelCoverCard extends StatelessWidget {
   final NovelCover novel;
@@ -12,17 +14,17 @@ class NovelCoverCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    void open() {
+      BookDetailHint.remember(novel.aid, novel.title, novel.img);
+      Navigator.pushNamed(context, '/novel/info', arguments: novel.aid);
+    }
+
     if (Theme.of(context).platform == TargetPlatform.iOS) {
       return AppleBookCover(
         title: novel.title,
         url: novel.img,
         source: sourceOf(novel.aid),
-        onTap:
-            () => Navigator.pushNamed(
-              context,
-              '/novel/info',
-              arguments: novel.aid,
-            ),
+        onTap: open,
       );
     }
     final cardRadius = BorderRadius.circular(usesMaterialYou ? 24 : 4);
@@ -30,18 +32,14 @@ class NovelCoverCard extends StatelessWidget {
       clipBehavior: Clip.antiAlias,
       elevation: usesMaterialYou ? 0 : .5,
       shape: RoundedRectangleBorder(borderRadius: cardRadius),
-      child: InkWell(
-        onTap:
-            () => Navigator.pushNamed(
-              context,
-              '/novel/info',
-              arguments: novel.aid,
-            ),
+      child: BookCardInk(
+        borderRadius: cardRadius,
+        onTap: open,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Expanded(
-              child: CachedImage(
+              child: BookCoverImage(
                 url: novel.img,
                 source: sourceOf(novel.aid),
                 width: double.infinity,

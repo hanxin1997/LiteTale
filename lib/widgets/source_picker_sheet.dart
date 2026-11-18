@@ -16,7 +16,8 @@ Future<SourceId?> showSourcePicker(
   BuildContext context, {
   required SourceId value,
   required List<SourceId> sources,
-}) {
+}) async {
+  if (ModalRoute.of(context)?.isCurrent == false) return null;
   FocusManager.instance.primaryFocus?.unfocus();
   final host = context.read<ApiHostCubit?>()?.state;
   final choices = List<SourceId>.unmodifiable(sources);
@@ -35,13 +36,32 @@ Future<SourceId?> showSourcePicker(
           ),
     );
   }
-  return showAppBottomSheet<SourceId>(
-    context: context,
+  final navigator = Navigator.of(context);
+  final localizations = MaterialLocalizations.of(context);
+  final route = ModalBottomSheetRoute<SourceId>(
+    capturedThemes: InheritedTheme.capture(
+      from: context,
+      to: navigator.context,
+    ),
+    barrierLabel: localizations.scrimLabel,
+    barrierOnTapHint: localizations.scrimOnTapHint(
+      localizations.bottomSheetLabel,
+    ),
+    modalBarrierColor: Theme.of(context).bottomSheetTheme.modalBarrierColor,
     isScrollControlled: true,
     useSafeArea: true,
     constraints: const BoxConstraints(maxWidth: double.infinity),
+    sheetAnimationStyle:
+        MediaQuery.disableAnimationsOf(context)
+            ? AnimationStyle.noAnimation
+            : null,
     builder: sheet,
   );
+  final selected = await navigator.push(route);
+  // Source selection can invalidate and rebuild discovery, shelf and history.
+  // Let the sheet finish closing before the caller starts that work.
+  await route.completed;
+  return selected;
 }
 
 class _SourceChoices extends StatelessWidget {
@@ -159,23 +179,19 @@ class _SourceChoices extends StatelessWidget {
                               color:
                                   active
                                       ? colors.secondaryContainer
-                                      : materialSurface(
-                                        colors,
-                                        colors.surfaceContainerHigh,
-                                        .08,
-                                      ),
-                              borderRadius:
-                                  eink ? null : BorderRadius.circular(20),
-                              shape:
-                                  eink
-                                      ? RoundedRectangleBorder(
-                                        borderRadius: BorderRadius.circular(20),
-                                        side: BorderSide(
+                                      : materialRaisedSurface(colors),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(
+                                  materialCardRadius,
+                                ),
+                                side:
+                                    eink
+                                        ? BorderSide(
                                           color: Colors.black,
                                           width: active ? 2 : 1,
-                                        ),
-                                      )
-                                      : null,
+                                        )
+                                        : BorderSide.none,
+                              ),
                               clipBehavior: Clip.antiAlias,
                               child: tile,
                             ),

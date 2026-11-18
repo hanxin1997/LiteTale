@@ -6,6 +6,7 @@ import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:wild/widgets/reader_illustration.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:wild/widgets/reader_raster_readiness.dart';
@@ -29,6 +30,8 @@ class PageCurlView extends StatefulWidget {
     this.onCenterTap,
     this.onBoundaryTurn,
     this.leafCount,
+    this.onTextHold,
+    this.contentRevision,
   }) : assert(pageCount > 0);
 
   final int pageCount;
@@ -41,6 +44,8 @@ class PageCurlView extends StatefulWidget {
   final bool tapToTurn;
   final VoidCallback? onCenterTap;
   final ValueChanged<int>? onBoundaryTurn;
+  final ValueChanged<Offset>? onTextHold;
+  final Object? contentRevision;
 
   /// Physical leaves may append into a previously half-empty last spread.
   final int? leafCount;
@@ -64,6 +69,7 @@ class PageCurlViewState extends State<PageCurlView>
   // PTQFlipper owns the actual curl on Android. Flutter pages are rasterized
   // only when pagination changes; no Dart geometry runs on drag frames.
   final Map<int, GlobalKey> _nativeKeys = {};
+  final Map<int, ReaderImageHitRegistry> _imageHits = {};
   final Map<int, ReaderRasterReadiness> _nativeRasterReadiness = {};
   final Map<int, Uint8List> _nativePages = {};
   final Set<int> _nativeRequestedPages = {};
@@ -127,7 +133,11 @@ class PageCurlViewState extends State<PageCurlView>
     // A local EPUB appends already paginated leaves to the same window. Keep
     // current textures/native view alive while only increasing its page count.
     // Reflow/recentring recreates this widget via the reader presentation key.
-    final resetPages = paperChanged || widget.pageCount < oldWidget.pageCount;
+    final contentChanged = widget.contentRevision != oldWidget.contentRevision;
+    final resetPages =
+        paperChanged ||
+        contentChanged ||
+        widget.pageCount < oldWidget.pageCount;
     final oldLeaves = oldWidget.leafCount;
     final filledHalfSpread =
         !resetPages &&
@@ -155,7 +165,7 @@ class PageCurlViewState extends State<PageCurlView>
       _nativeChannel?.setMethodCallHandler(null);
       _nativeChannel = null;
     }
-    if (paperChanged ||
+    if (resetPages ||
         filledHalfSpread ||
         widget.pageCount != oldWidget.pageCount ||
         widget.index != oldWidget.index) {
@@ -285,6 +295,7 @@ class PageCurlViewState extends State<PageCurlView>
           await _nativeChannel?.invokeMethod<void>('setPage', {
             'index': index,
             'bytes': bytes,
+            'imageRegions': _imageHits[index]?.serialized ?? const [],
           });
           if (!_nativeReady && index == widget.index) {
             setState(() => _nativeReady = true);
@@ -413,6 +424,12 @@ class PageCurlViewState extends State<PageCurlView>
   }
 
   void _loadingTap(Offset position) {
+    if (_imageHits[widget.index]?.openAt(
+          Offset(position.dx / _width, position.dy / _height),
+        ) ==
+        true) {
+      return;
+    }
     if (!widget.tapToTurn) {
       widget.onCenterTap?.call();
       return;
@@ -431,6 +448,33 @@ class PageCurlViewState extends State<PageCurlView>
   Future<void> _handleNativeCall(MethodCall call) async {
     if (!mounted) return;
     switch (call.method) {
+      case 'textHold':
+        final args = call.arguments as Map;
+        if (!isTurning &&
+            args['index'] == widget.index &&
+            widget.onTextHold != null) {
+          final render = context.findRenderObject();
+          if (render is RenderBox && render.hasSize) {
+            widget.onTextHold!(
+              render.localToGlobal(
+                Offset(
+                  (args['x'] as num).toDouble() * render.size.width,
+                  (args['y'] as num).toDouble() * render.size.height,
+                ),
+              ),
+            );
+          }
+        }
+      case 'imageTap':
+        final args = call.arguments as Map;
+        if (!isTurning && args['index'] == widget.index) {
+          _imageHits[widget.index]?.openAt(
+            Offset(
+              (args['x'] as num).toDouble(),
+              (args['y'] as num).toDouble(),
+            ),
+          );
+        }
       case 'turnStarted':
         if (!_nativeTurning) _nativeTurnSequence++;
         _nativeTurning = true;
@@ -462,6 +506,7 @@ class PageCurlViewState extends State<PageCurlView>
               await _nativeChannel!.invokeMethod<void>('setPage', {
                 'index': index,
                 'bytes': cached,
+                'imageRegions': _imageHits[index]?.serialized ?? const [],
               });
               _nativeRequestedPages.remove(index);
             } catch (error) {
@@ -486,6 +531,7 @@ class PageCurlViewState extends State<PageCurlView>
     // Native PNGs keep the nearby history; offscreen Flutter page widgets do
     // not need a GlobalKey for every page the reader has ever visited.
     _nativeKeys.removeWhere((index, _) => !visible.contains(index));
+    _imageHits.removeWhere((index, _) => !visible.contains(index));
     _nativeRasterReadiness.removeWhere((index, _) => !visible.contains(index));
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -523,7 +569,9 @@ class PageCurlViewState extends State<PageCurlView>
           fit: StackFit.expand,
           children: [
             for (final index in visible.where(
-              (index) => !_nativePages.containsKey(index),
+              (index) =>
+                  !_nativePages.containsKey(index) ||
+                  index == widget.index && widget.onTextHold != null,
             ))
               // Keep the boundary painted so toImage can rasterize its page,
               // but keep their composited opacity negligible underneath the
@@ -533,12 +581,18 @@ class PageCurlViewState extends State<PageCurlView>
                 opacity: !_nativeReady && index == widget.index ? 1 : 0.01,
                 child: RepaintBoundary(
                   key: _nativeKeys.putIfAbsent(index, GlobalKey.new),
-                  child: ReaderRasterScope(
-                    readiness: _readinessFor(index),
-                    child: DecoratedBox(
-                      decoration: widget.paperDecoration,
-                      child: SizedBox.expand(
-                        child: widget.pageBuilder(context, index),
+                  child: ReaderImageHitScope(
+                    registry: _imageHits.putIfAbsent(
+                      index,
+                      () => ReaderImageHitRegistry(_nativeKeys[index]!),
+                    ),
+                    child: ReaderRasterScope(
+                      readiness: _readinessFor(index),
+                      child: DecoratedBox(
+                        decoration: widget.paperDecoration,
+                        child: SizedBox.expand(
+                          child: widget.pageBuilder(context, index),
+                        ),
                       ),
                     ),
                   ),
@@ -578,6 +632,8 @@ class PageCurlViewState extends State<PageCurlView>
                           .invokeMethod<void>('setPage', {
                             'index': entry.key,
                             'bytes': entry.value,
+                            'imageRegions':
+                                _imageHits[entry.key]?.serialized ?? const [],
                           })
                           .catchError((Object error) {
                             debugPrint(
@@ -604,6 +660,11 @@ class PageCurlViewState extends State<PageCurlView>
                 child: GestureDetector(
                   behavior: HitTestBehavior.opaque,
                   onTapUp: (details) => _loadingTap(details.localPosition),
+                  onLongPressStart:
+                      widget.onTextHold == null
+                          ? null
+                          : (details) =>
+                              widget.onTextHold!(details.globalPosition),
                   onHorizontalDragStart: (details) {
                     _loadingDragDx = 0;
                     _loadingDragStartY = details.localPosition.dy;

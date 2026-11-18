@@ -5,6 +5,8 @@ import 'package:wild/sources/book_source.dart';
 import 'package:wild/widgets/book_grid_delegate.dart';
 import 'package:wild/sources/source_api.dart';
 import 'package:wild/services/read_request.dart';
+import 'package:wild/services/bili_browser.dart';
+import 'package:wild/utils/wenku8_network_error.dart';
 import '../widgets/novel_cover_card.dart';
 import '../widgets/wenku8_recovery_button.dart';
 import '../widgets/bili_recovery_button.dart';
@@ -67,6 +69,7 @@ class _SearchPageState extends State<SearchPage> {
     sourceRevision.removeListener(_sourceChanged);
     _request++;
     _readRequest?.cancel();
+    _releaseSearchChallenge();
     _searchController.dispose();
     super.dispose();
   }
@@ -95,6 +98,7 @@ class _SearchPageState extends State<SearchPage> {
   void _resetQuery() {
     _request++;
     _readRequest?.cancel();
+    _releaseSearchChallenge();
     setState(() {
       _loading = false;
       _results = null;
@@ -102,7 +106,17 @@ class _SearchPageState extends State<SearchPage> {
     });
   }
 
-  Future<void> _search({bool more = false}) async {
+  void _releaseSearchChallenge() {
+    final error = _error;
+    if (error is BiliSiteVerificationRequired && error.isSearchVerification) {
+      BiliBrowserSession.instance.releaseHeldSearch(error, unclaimedOnly: true);
+    }
+  }
+
+  Future<void> _search({
+    bool more = false,
+    bool openSearchVerification = true,
+  }) async {
     final key = _searchController.text.trim();
     if (key.isEmpty) {
       _resetQuery();
@@ -123,7 +137,12 @@ class _SearchPageState extends State<SearchPage> {
     final page = more ? _results!.currentPage + 1 : 1;
     final request = ++_request;
     _readRequest?.cancel();
-    final readRequest = _readRequest = ReadRequest();
+    _releaseSearchChallenge();
+    final readRequest =
+        _readRequest =
+            page == 1 && activeSource.value == SourceId.bili
+                ? BiliSearchRequest()
+                : ReadRequest();
     FocusManager.instance.primaryFocus?.unfocus();
     setState(() {
       _loading = true;
@@ -166,23 +185,84 @@ class _SearchPageState extends State<SearchPage> {
       });
       _loadHistories();
     } catch (e) {
-      if (!mounted || request != _request) return;
+      if (!mounted || request != _request) {
+        if (e is BiliSiteVerificationRequired && e.isSearchVerification) {
+          BiliBrowserSession.instance.releaseHeldSearch(e, unclaimedOnly: true);
+        }
+        return;
+      }
       setState(() {
         _loading = false;
         _error = e;
       });
+      if (openSearchVerification &&
+          e is BiliSiteVerificationRequired &&
+          e.isSearchVerification &&
+          (!e.manualSearch ||
+              (readRequest is BiliSearchRequest &&
+                  readRequest.openOriginalPage)) &&
+          e.searchKeyword == key &&
+          ModalRoute.of(context)?.isCurrent == true) {
+        final verified = await openBiliVerification(
+          context,
+          e,
+        ).catchError((Object _) => false);
+        if (verified &&
+            mounted &&
+            request == _request &&
+            _searchController.text.trim() == key &&
+            _searchType == type) {
+          await _search(more: more, openSearchVerification: false);
+        }
+      }
     }
   }
 
   Widget _body() {
     if (_loading && _results == null) {
+      final request = _readRequest;
       return SourceLoadingIndicator(
         source: activeSource.value,
         requestKey: _request,
-        message: '正在搜索，请稍候…',
+        message:
+            request is BiliSearchRequest && request.openOriginalPage
+                ? '正在打开原站…'
+                : '正在搜索，请稍候…',
+        action:
+            request is BiliSearchRequest
+                ? AppButton.outlinedIcon(
+                  onPressed:
+                      request.openOriginalPage
+                          ? null
+                          : () =>
+                              setState(() => request.openOriginalPage = true),
+                  icon: const Icon(Icons.open_in_browser_rounded),
+                  label: const Text('在应用内继续搜索'),
+                )
+                : null,
       );
     }
     if (_error != null && _results == null) {
+      if (_error case final BiliSiteVerificationRequired request
+          when request.manualSearch) {
+        return Center(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text('可在原站页面继续本次搜索'),
+                const SizedBox(height: 12),
+                BiliRecoveryButton(
+                  error: request,
+                  source: activeSource.value,
+                  onRecovered: () => _search(openSearchVerification: false),
+                ),
+              ],
+            ),
+          ),
+        );
+      }
       return Center(
         child: SingleChildScrollView(
           padding: const EdgeInsets.all(24),
@@ -193,7 +273,12 @@ class _SearchPageState extends State<SearchPage> {
               const SizedBox(height: 16),
               const Text('搜索未完成'),
               const SizedBox(height: 8),
-              Text(_error.toString(), textAlign: TextAlign.center),
+              Text(
+                activeSource.value == SourceId.wenku8
+                    ? wenku8ReadErrorMessage(_error)
+                    : _error.toString(),
+                textAlign: TextAlign.center,
+              ),
               SourceWebsiteLink(source: activeSource.value),
               const SizedBox(height: 16),
               AppButton.filledIcon(
@@ -209,7 +294,7 @@ class _SearchPageState extends State<SearchPage> {
               BiliRecoveryButton(
                 error: _error,
                 source: activeSource.value,
-                onRecovered: () => _search(),
+                onRecovered: () => _search(openSearchVerification: false),
               ),
             ],
           ),
@@ -273,7 +358,8 @@ class _SearchPageState extends State<SearchPage> {
           BiliRecoveryButton(
             error: _error,
             source: activeSource.value,
-            onRecovered: () => _search(more: true),
+            onRecovered:
+                () => _search(more: true, openSearchVerification: false),
           ),
           if (!_loading && _results!.currentPage < _results!.maxPage)
             AppButton.text(

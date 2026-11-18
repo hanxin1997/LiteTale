@@ -1,18 +1,39 @@
-import 'package:flutter/material.dart';
 import 'package:wild/eink/eink_policy.dart';
-import 'package:wild/sources/source_api.dart';
+import 'package:wild/services/reader_images.dart';
+import 'package:flutter/material.dart';
 import 'package:wild/sources/book_source.dart';
-import 'package:wild/sources/lnovel_source.dart';
-import 'package:wild/services/epub/local_epub_library.dart';
-import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'dart:ui' as ui;
-import 'package:http/http.dart' as http;
+
+/// EPUB hotspots supply original image bytes without a cached inline frame.
+/// Keep the original bytes for export and decode just the display frame.
+class EInkMemoryImage extends MemoryImage {
+  const EInkMemoryImage(super.bytes);
+
+  @override
+  ImageStreamCompleter loadImage(MemoryImage key, ImageDecoderCallback decode) {
+    final codec = ui.ImmutableBuffer.fromUint8List(key.bytes).then(
+      (buffer) => decode(buffer),
+    );
+    return OneFrameImageStreamCompleter(_firstFrame(codec, key.scale));
+  }
+}
+
+Future<ImageInfo> _firstFrame(Future<ui.Codec> pending, double scale) async {
+  final codec = await pending;
+  try {
+    final frame = await codec.getNextFrame();
+    return ImageInfo(image: frame.image, scale: scale);
+  } finally {
+    codec.dispose();
+  }
+}
 
 class CachedImageProvider extends ImageProvider<CachedImageProvider> {
   final String url;
   final double scale;
   final SourceId source;
+  final int revision;
   final bool staticFrame;
 
   CachedImageProvider(
@@ -20,17 +41,12 @@ class CachedImageProvider extends ImageProvider<CachedImageProvider> {
     required this.source,
     this.scale = 1.0,
     this.staticFrame = false,
-  });
+    int? revision,
+  }) : revision = revision ?? sourceRevision.value;
 
-  CachedImageProvider firstFrameOnly() =>
-      staticFrame
-          ? this
-          : CachedImageProvider(
-            url,
-            source: source,
-            scale: scale,
-            staticFrame: true,
-          );
+  CachedImageProvider firstFrameOnly() => staticFrame ? this : CachedImageProvider(
+    url, source: source, scale: scale, revision: revision, staticFrame: true,
+  );
 
   @override
   ImageStreamCompleter loadImage(
@@ -40,25 +56,14 @@ class CachedImageProvider extends ImageProvider<CachedImageProvider> {
     if (key.staticFrame) {
       // Decode through the same source-owned request path, but never schedule
       // subsequent GIF/WebP frames. The separate key prevents cache crossover.
-      return OneFrameImageStreamCompleter(_loadFirstFrame(key, decode));
+      return OneFrameImageStreamCompleter(
+        _firstFrame(_loadAsync(key, decode), key.scale),
+      );
     }
     return MultiFrameImageStreamCompleter(
       codec: _loadAsync(key, decode),
       scale: key.scale,
     );
-  }
-
-  Future<ImageInfo> _loadFirstFrame(
-    CachedImageProvider key,
-    ImageDecoderCallback decode,
-  ) async {
-    final codec = await _loadAsync(key, decode);
-    try {
-      final frame = await codec.getNextFrame();
-      return ImageInfo(image: frame.image, scale: key.scale);
-    } finally {
-      codec.dispose();
-    }
   }
 
   @override
@@ -71,42 +76,16 @@ class CachedImageProvider extends ImageProvider<CachedImageProvider> {
     ImageDecoderCallback decode,
   ) async {
     assert(key == this);
-    if (source == SourceId.localEpub) {
-      final bytes = await LocalEpubLibrary.instance.readAsset(url);
-      return decode(await ui.ImmutableBuffer.fromUint8List(bytes));
+    final ref = ReaderImageRef(source: source, url: url);
+    final revision = key.revision;
+    final repository = ReaderImageRepository.instance;
+    final data = await repository.read(ref, revision: revision);
+    try {
+      return await decode(await ui.ImmutableBuffer.fromUint8List(data.bytes));
+    } on Object {
+      repository.invalidate(ref, revision: revision);
+      rethrow;
     }
-    final uri = Uri.tryParse(url);
-    if (uri == null || !['https', 'http'].contains(uri.scheme)) {
-      throw const FormatException('图片地址无效');
-    }
-    // A book owns its image request policy. Wenku8 illustrations can use an
-    // unrelated CDN hostname, so the hostname cannot identify the book source.
-    if (source != SourceId.wenku8) {
-      final response = await http
-          .get(
-            uri,
-            headers:
-                source == SourceId.lnovel
-                    ? LNovelSource.headers
-                    : source == SourceId.bili
-                    ? {
-                      'User-Agent': 'Mozilla/5.0',
-                      'Referer': 'https://www.bilinovel.net/',
-                    }
-                    : source.isRule ||
-                        source == SourceId.huanmeng ||
-                        source == SourceId.esj
-                    ? ruleImageHeaders(source)
-                    : {'Referer': 'https://www.lightnovel.app/'},
-          )
-          .timeout(const Duration(seconds: 25));
-      if (response.statusCode != 200) throw const FormatException('图片加载失败');
-      return decode(await ui.ImmutableBuffer.fromUint8List(response.bodyBytes));
-    }
-    final path = await downloadImage(url: url);
-    return decode(
-      await ui.ImmutableBuffer.fromUint8List(await File(path).readAsBytes()),
-    );
   }
 
   @override
@@ -116,14 +95,11 @@ class CachedImageProvider extends ImageProvider<CachedImageProvider> {
     return url == typedOther.url &&
         scale == typedOther.scale &&
         source == typedOther.source &&
-        staticFrame == typedOther.staticFrame;
+        revision == typedOther.revision && staticFrame == typedOther.staticFrame;
   }
 
   @override
-  int get hashCode =>
-      staticFrame
-          ? Object.hash(url, scale, source, true)
-          : Object.hash(url, scale, source);
+  int get hashCode => Object.hash(url, scale, source, revision, staticFrame);
 
   @override
   String toString() =>

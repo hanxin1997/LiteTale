@@ -1,5 +1,4 @@
 import 'package:wild/eink/eink_overlays.dart';
-import 'package:wild/eink/eink_progress_indicator.dart';
 import 'package:wild/widgets/platform_controls.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:flutter/material.dart';
@@ -8,19 +7,42 @@ import 'package:wild/widgets/bili_recovery_button.dart';
 import 'package:wild/sources/book_source.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:wild/sources/source_api.dart' as w8;
-import 'package:wild/widgets/cached_image.dart';
-import 'package:flutter_html/flutter_html.dart';
+import 'package:wild/widgets/book_details_view.dart';
+import 'package:wild/widgets/reader_controls.dart';
+import 'package:wild/models/book_detail_hint.dart';
 import 'package:wild/cubits/api_host_cubit.dart';
 import 'package:wild/pages/home/bookshelf_cubit.dart';
+import 'package:wild/pages/search_page.dart';
 import 'package:wild/widgets/cf_action_loader.dart';
-import 'package:wild/theme/app_fonts.dart';
 import 'package:wild/utils/wenku8_network_error.dart';
 import 'package:wild/widgets/source_website.dart';
 import 'package:wild/pages/shelf_login_page.dart';
 import 'package:wild/theme/horizontal_page_transitions.dart';
 
-import '../../src/rust/wenku8/models.dart';
 import 'novel_info_cubit.dart';
+import 'reader_route.dart';
+import 'package:wild/services/reading_progress.dart';
+import 'package:wild/services/reader_listening_chapter.dart';
+
+const novelInfoRouteName = '/novel/info';
+
+PageRoute<void> novelInfoRoute(RouteSettings settings) =>
+    HorizontalCoverPageRoute<void>(
+      settings: settings,
+      builder: (_) {
+        final args = settings.arguments;
+        return NovelInfoPage(
+          novelId:
+              args is Map<String, dynamic>
+                  ? args['novelId'] as String
+                  : args as String,
+          listening:
+              args is Map<String, dynamic>
+                  ? args['listening'] as ReaderListeningRequest?
+                  : null,
+        );
+      },
+    );
 
 bool _isCfError(dynamic e) {
   return shouldUseWenku8WebViewFallback(e);
@@ -28,14 +50,18 @@ bool _isCfError(dynamic e) {
 
 class NovelInfoPage extends StatelessWidget {
   final String novelId;
+  final ReaderListeningRequest? listening;
 
-  const NovelInfoPage({super.key, required this.novelId});
+  const NovelInfoPage({super.key, required this.novelId, this.listening});
 
   @override
   Widget build(BuildContext context) {
-    // 获取全局的 BookshelfCubit
-    final bookshelfCubit = context.read<BookshelfCubit>();
-
+    if (!supportsLocalEpub && novelId.startsWith('epub:')) {
+      return Scaffold(
+        appBar: AppBar(title: const Text('小说详情')),
+        body: const Center(child: Text('此设备无法打开本地 EPUB')),
+      );
+    }
     Future<void> navigateToDownload(BuildContext context) async {
       final state = context.read<NovelInfoCubit>().state;
       if (state is! NovelInfoLoaded) return;
@@ -67,207 +93,221 @@ class NovelInfoPage extends StatelessWidget {
       child: Scaffold(
         appBar: AppBar(
           title: const Text('小说详情'),
-          actions: [
-            if (sourceOf(novelId) != SourceId.localEpub)
-              BlocBuilder<NovelInfoCubit, NovelInfoState>(
-                builder: (context, state) {
-                  if (state is! NovelInfoLoaded) {
-                    return const SizedBox.shrink();
-                  }
-                  return AppIconButton(
-                    icon: const Icon(Icons.download_outlined),
-                    tooltip:
-                        sourceOf(novelId) == SourceId.wenku8
-                            ? '离线下载'
-                            : '此书源暂不支持离线下载',
-                    onPressed:
-                        sourceOf(novelId) == SourceId.wenku8
-                            ? () => navigateToDownload(context)
-                            : null,
-                  );
-                },
-              ),
-            if (sourceOf(novelId) != SourceId.localEpub)
-              BlocBuilder<BookshelfCubit, BookshelfState>(
-                builder: (context, state) {
-                  if (state.status == BookshelfStatus.loading) {
-                    return const Center(
-                      child: SizedBox(
-                        width: 24,
-                        height: 24,
-                        child: EInkProgressIndicator(
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        ),
+          leadingWidth: usesAppleGlass ? 60 : null,
+          leading:
+              usesAppleGlass &&
+                      (ModalRoute.of(context)?.impliesAppBarDismissal ?? false)
+                  ? Padding(
+                    padding: const EdgeInsetsDirectional.only(start: 16),
+                    child: Center(
+                      child: IosReaderBackButton(
+                        onPressed: () => Navigator.maybePop(context),
                       ),
-                    );
-                  }
-                  final isInBookshelf = state.isBookInBookshelf(novelId);
-                  return AppIconButton(
-                    icon: Icon(
-                      isInBookshelf ? Icons.bookmark : Icons.bookmark_border,
-                      color:
-                          isInBookshelf
-                              ? Theme.of(context).colorScheme.primary
+                    ),
+                  )
+                  : null,
+          actions: [
+            BlocBuilder<NovelInfoCubit, NovelInfoState>(
+              buildWhen: _detailActionsChanged,
+              builder: (context, state) {
+                if (state is! NovelInfoLoaded) return const SizedBox.shrink();
+                final wenku8 = sourceOf(novelId) == SourceId.wenku8;
+                final actions = [
+                  if (state.novelInfo.tags.any((tag) => tag.trim().isNotEmpty))
+                    BookDetailTagsButton(
+                      tags: state.novelInfo.tags,
+                      onTag:
+                          wenku8
+                              ? (tag) => Navigator.pushNamed(
+                                context,
+                                '/category',
+                                arguments: {'tag': tag},
+                              )
                               : null,
                     ),
-                    onPressed: () async {
-                      try {
-                        if (isInBookshelf) {
-                          await bookshelfCubit.removeFromBookshelf(novelId);
-                        } else {
-                          await bookshelfCubit.addToBookshelf(novelId);
-                        }
-                      } catch (e) {
-                        if (!context.mounted) return;
-                        if (_isCfError(e)) {
-                          final apiHost = context.read<ApiHostCubit>().state;
-                          String actionPath;
-                          if (isInBookshelf) {
-                            final bid = bookshelfCubit.state.getBookBid(
-                              novelId,
-                            );
-                            if (bid == null) return;
-                            actionPath =
-                                '/modules/article/bookcase.php?delid=$bid';
-                          } else {
-                            actionPath =
-                                '/modules/article/addbookcase.php?bid=$novelId';
-                          }
-                          showEinkAwareDialog(
-                            context: context,
-                            barrierDismissible: false,
-                            builder:
-                                (ctx) => Dialog.fullscreen(
-                                  child: CfActionLoader(
-                                    apiHost: apiHost,
-                                    actionPath: actionPath,
-                                    successUrlKeyword: 'bookcase.php',
-                                    successBodyKeyword: '处理成功',
-                                    onSuccess: () {
-                                      Navigator.of(ctx).pop();
-                                      bookshelfCubit.loadBookcases();
-                                    },
-                                    onError: (err) {
-                                      Navigator.of(ctx).pop();
-                                      ScaffoldMessenger.of(
-                                        context,
-                                      ).showSnackBar(
-                                        SnackBar(content: Text('操作失敗: $err')),
-                                      );
-                                    },
-                                  ),
-                                ),
-                          );
-                        } else {
-                          ScaffoldMessenger.of(
+                  if (w8.sourceSupportsComments(novelId))
+                    AppIconButton(
+                      key: const ValueKey('detail-comments'),
+                      tooltip: '书评',
+                      icon: const Icon(Icons.chat_bubble_outline_rounded),
+                      onPressed:
+                          () => Navigator.pushNamed(
                             context,
-                          ).showSnackBar(SnackBar(content: Text('操作失败: $e')));
-                        }
-                      }
-                    },
-                  );
-                },
-              ),
+                            '/novel/reviews',
+                            arguments: {
+                              'aid': novelId,
+                              'title': state.novelInfo.title,
+                            },
+                          ),
+                    ),
+                  if (wenku8)
+                    AppIconButton(
+                      icon: const Icon(Icons.download_outlined),
+                      tooltip: '离线下载',
+                      onPressed: () => navigateToDownload(context),
+                    ),
+                ];
+                if (actions.isEmpty) return const SizedBox.shrink();
+                final buttons = Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: actions,
+                );
+                if (!usesAppleGlass) return buttons;
+                return Padding(
+                  padding: const EdgeInsetsDirectional.only(end: 16),
+                  child: Center(
+                    child: SizedBox(
+                      height: 44,
+                      child: AppleGlassSurface(capsule: true, child: buttons),
+                    ),
+                  ),
+                );
+              },
+            ),
           ],
         ),
-        body: BlocBuilder<NovelInfoCubit, NovelInfoState>(
-          builder: (context, state) {
-            if (state is NovelInfoLoading) {
-              return SourceLoadingIndicator(
-                source: sourceOf(novelId),
-                requestKey: state,
-              );
-            }
-            if (state is NovelInfoError) {
-              if (state.loginRequired) {
+        body: _ListeningDetailEntry(
+          request: listening,
+          child: BlocBuilder<NovelInfoCubit, NovelInfoState>(
+            buildWhen: (previous, current) {
+              if (previous is NovelInfoLoaded && current is NovelInfoLoaded) {
+                return !identical(previous.novelInfo, current.novelInfo) ||
+                    !identical(previous.volumes, current.volumes) ||
+                    previous.readingHistory?.chapterId !=
+                        current.readingHistory?.chapterId;
+              }
+              return true;
+            },
+            builder: (context, state) {
+              if (state is NovelInfoLoading || state is NovelInfoLoaded) {
+                return _NovelInfoContent(novelId: novelId, state: state);
+              }
+              if (state is NovelInfoError) {
+                if (state.loginRequired) {
+                  return Center(
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Text(state.message, textAlign: TextAlign.center),
+                          SourceWebsiteLink(source: sourceOf(novelId)),
+                          const SizedBox(height: 16),
+                          AppButton.filled(
+                            onPressed: () async {
+                              final loggedIn = await Navigator.of(
+                                context,
+                              ).push<bool>(
+                                HorizontalCoverPageRoute(
+                                  builder: (_) => const ShelfLoginPage(),
+                                ),
+                              );
+                              if (loggedIn == true && context.mounted) {
+                                context.read<NovelInfoCubit>().load();
+                              }
+                            },
+                            child: const Text('登录轻书架'),
+                          ),
+                        ],
+                      ),
+                    ),
+                  );
+                }
                 return Center(
                   child: Padding(
                     padding: const EdgeInsets.all(24),
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        Text(state.message, textAlign: TextAlign.center),
-                        SourceWebsiteLink(source: sourceOf(novelId)),
+                        Text(
+                          '加载失败: ${state.message}',
+                          textAlign: TextAlign.center,
+                        ),
                         const SizedBox(height: 16),
-                        AppButton.filled(
-                          onPressed: () async {
-                            final loggedIn = await Navigator.of(
-                              context,
-                            ).push<bool>(
-                              HorizontalCoverPageRoute(
-                                builder: (_) => const ShelfLoginPage(),
-                              ),
-                            );
-                            if (loggedIn == true && context.mounted) {
-                              context.read<NovelInfoCubit>().load();
-                            }
-                          },
-                          child: const Text('登录轻书架'),
+                        AppButton.filledIcon(
+                          onPressed:
+                              () => context.read<NovelInfoCubit>().load(),
+                          icon: const Icon(Icons.refresh),
+                          label: const Text('重新加载'),
+                        ),
+                        SourceWebsiteLink(source: sourceOf(novelId)),
+                        Wenku8RecoveryButton(
+                          error: state.cause ?? state.message,
+                          source: sourceOf(novelId),
+                          onRecovered:
+                              () => context.read<NovelInfoCubit>().load(),
+                        ),
+                        BiliRecoveryButton(
+                          error: state.cause,
+                          source: sourceOf(novelId),
+                          onRecovered:
+                              () => context.read<NovelInfoCubit>().load(),
                         ),
                       ],
                     ),
                   ),
                 );
               }
-              return Center(
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Text(
-                        '加载失败: ${state.message}',
-                        textAlign: TextAlign.center,
-                      ),
-                      const SizedBox(height: 16),
-                      AppButton.filledIcon(
-                        onPressed: () => context.read<NovelInfoCubit>().load(),
-                        icon: const Icon(Icons.refresh),
-                        label: const Text('重新加载'),
-                      ),
-                      SourceWebsiteLink(source: sourceOf(novelId)),
-                      Wenku8RecoveryButton(
-                        error: state.cause ?? state.message,
-                        source: sourceOf(novelId),
-                        onRecovered:
-                            () => context.read<NovelInfoCubit>().load(),
-                      ),
-                      BiliRecoveryButton(
-                        error: state.cause,
-                        source: sourceOf(novelId),
-                        onRecovered:
-                            () => context.read<NovelInfoCubit>().load(),
-                      ),
-                    ],
-                  ),
-                ),
-              );
-            }
-            if (state is NovelInfoLoaded) {
-              return _NovelInfoContent(
-                novelInfo: state.novelInfo,
-                volumes: state.volumes,
-                novelId: novelId,
-              );
-            }
-            return const SizedBox.shrink();
-          },
+              return const SizedBox.shrink();
+            },
+          ),
         ),
       ),
     );
   }
 }
 
-class _NovelInfoContent extends StatelessWidget {
-  final NovelInfo novelInfo;
-  final List<Volume> volumes;
-  final String novelId;
+class _ListeningDetailEntry extends StatefulWidget {
+  const _ListeningDetailEntry({required this.request, required this.child});
+  final ReaderListeningRequest? request;
+  final Widget child;
 
-  const _NovelInfoContent({
-    required this.novelInfo,
-    required this.volumes,
-    required this.novelId,
-  });
+  @override
+  State<_ListeningDetailEntry> createState() => _ListeningDetailEntryState();
+}
+
+class _ListeningDetailEntryState extends State<_ListeningDetailEntry> {
+  bool _started = false;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final request = widget.request;
+    if (_started || request == null) return;
+    _started = true;
+    final scope = bookNavigationScope(request.chapter.aid);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      if (!mounted ||
+          !await waitForListeningArrival(context) ||
+          !mounted ||
+          scope != bookNavigationScope(request.chapter.aid)) {
+        return;
+      }
+      final cubit = context.read<NovelInfoCubit>();
+      await openReaderListening(
+        context,
+        request,
+        onPosition: cubit.acceptListeningPosition,
+      );
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+bool _detailActionsChanged(NovelInfoState previous, NovelInfoState current) {
+  if (previous is NovelInfoLoaded && current is NovelInfoLoaded) {
+    return !identical(previous.novelInfo, current.novelInfo);
+  }
+  return (previous is NovelInfoLoaded) != (current is NovelInfoLoaded);
+}
+
+class _NovelInfoContent extends StatelessWidget {
+  final String novelId;
+  final NovelInfoState state;
+
+  const _NovelInfoContent({required this.novelId, required this.state});
 
   Future<void> _navigateToReader(
     BuildContext context,
@@ -285,403 +325,169 @@ class _NovelInfoContent extends StatelessWidget {
       initialPage = currentState.readingHistory!.progressPage;
     }
 
-    await Navigator.pushNamed(
+    if (ModalRoute.of(context)?.isCurrent == false) return;
+    final cubit = context.read<NovelInfoCubit>();
+    final scope = bookNavigationScope(novelId);
+    var listened = false;
+    await pushNovelReader(
       context,
-      '/novel/reader',
-      arguments: {
-        'novelId': novelId,
-        'chapterId': chapterId,
-        'title': title,
-        'volumes': volumes,
-        'novelInfo': novelInfo,
-        'initialPage': initialPage,
-        if (novelId.startsWith('epub:') &&
-            currentState.readingHistory?.chapterId == chapterId)
-          'initialTextOffset': currentState.readingHistory!.progress,
+      RouteSettings(
+        name: novelReaderRouteName,
+        arguments: {
+          'novelId': novelId,
+          'chapterId': chapterId,
+          'title': title,
+          'volumes': currentState.volumes,
+          'novelInfo': currentState.novelInfo,
+          'initialPage': initialPage,
+          if ((novelId.startsWith('epub:') ||
+                  initialPage == scrollReaderProgressPage) &&
+              currentState.readingHistory?.chapterId == chapterId)
+            'initialTextOffset': currentState.readingHistory!.progress,
+        },
+      ),
+      onListeningPosition: (progress) {
+        listened = true;
+        cubit.acceptListeningPosition(progress);
       },
     );
-    // 返回后更新历史记录
-    if (context.mounted) context.read<NovelInfoCubit>().loadHistory();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final state = context.watch<NovelInfoCubit>().state;
-    if (state is! NovelInfoLoaded) return const SizedBox.shrink();
-
-    return CustomScrollView(
-      slivers: [
-        SliverToBoxAdapter(
-          child: _NovelHeader(novelInfo: novelInfo, source: sourceOf(novelId)),
-        ),
-        SliverToBoxAdapter(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(
-              horizontal: 16.0,
-              vertical: 8.0,
-            ),
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-              children: [
-                _StatItem(
-                  icon: Icons.update,
-                  label: sourceOf(novelId) == SourceId.localEpub ? '导入' : '更新',
-                  value: novelInfo.finUpdate,
-                ),
-                if (sourceOf(novelId) != SourceId.localEpub)
-                  _StatItem(
-                    icon: Icons.comment,
-                    label: '评论',
-                    value: '',
-                    onTap: () {
-                      if (sourceOf(novelId) != SourceId.wenku8) {
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('该书源的评论请前往原站查看')),
-                        );
-                        return;
-                      }
-                      Navigator.of(context).pushNamed(
-                        '/novel/reviews',
-                        arguments: {'aid': novelId, 'title': novelInfo.title},
-                      );
-                    },
-                  ),
-                // _StatItem(
-                //   icon: Icons.local_fire_department,
-                //   label: '热度',
-                //   value: novelInfo.heat,
-                // ),
-                // _StatItem(
-                //   icon: Icons.trending_up,
-                //   label: '趋势',
-                //   value: novelInfo.trending,
-                // ),
-              ],
-            ),
-          ),
-        ),
-        SliverToBoxAdapter(
-          child: _NovelTags(tags: novelInfo.tags, source: sourceOf(novelId)),
-        ),
-        // 添加继续阅读按钮
-        if (state.readingHistory != null)
-          SliverToBoxAdapter(
-            child: Padding(
-              padding: const EdgeInsets.only(
-                top: 24,
-                bottom: 16,
-                left: 16,
-                right: 16,
-              ),
-              child: AppButton.elevatedIcon(
-                onPressed:
-                    () => _navigateToReader(
-                      context,
-                      state.readingHistory!.novelId,
-                      state.readingHistory!.chapterId,
-                      state.readingHistory!.novelName,
-                    ),
-                icon: const Icon(Icons.book),
-                label: Text('继续阅读 - ${state.readingHistory!.chapterTitle}'),
-                style: ElevatedButton.styleFrom(
-                  minimumSize: const Size(double.infinity, 48),
-                ),
-              ),
-            ),
-          ),
-        SliverToBoxAdapter(
-          child: _NovelDescription(description: novelInfo.introduce),
-        ),
-        SliverList(
-          delegate: SliverChildBuilderDelegate((context, index) {
-            final volume = volumes[index];
-            return _VolumeItem(
-              volume: volume,
-              onChapterTap:
-                  (chapter) => _navigateToReader(
-                    context,
-                    chapter.aid,
-                    chapter.cid,
-                    chapter.title,
-                  ),
-            );
-          }, childCount: volumes.length),
-        ),
-
-        SliverToBoxAdapter(child: SafeArea(top: false, child: Container())),
-      ],
-    );
-  }
-}
-
-class _NovelHeader extends StatelessWidget {
-  final NovelInfo novelInfo;
-  final SourceId source;
-
-  const _NovelHeader({required this.novelInfo, required this.source});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          if (source == SourceId.localEpub && novelInfo.imgUrl.isEmpty)
-            Container(
-              width: 120,
-              height: 160,
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.primaryContainer,
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Icon(
-                Icons.menu_book_rounded,
-                size: 48,
-                color: Theme.of(context).colorScheme.onPrimaryContainer,
-              ),
-            )
-          else
-            CachedImage(
-              url: novelInfo.imgUrl,
-              source: source,
-              width: 120,
-              height: 160,
-              fit: BoxFit.cover,
-              borderRadius: BorderRadius.circular(8),
-            ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  novelInfo.title,
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 8),
-                InkWell(
-                  onTap:
-                      source == SourceId.localEpub
-                          ? null
-                          : () async {
-                            if (!w8.sourceSupportsAuthorSearch(source)) {
-                              ScaffoldMessenger.of(context).showSnackBar(
-                                const SnackBar(content: Text('该书源暂不支持作者查找')),
-                              );
-                              return;
-                            }
-                            await Navigator.pushNamed(
-                              context,
-                              '/search',
-                              arguments: {
-                                'searchType': 'author',
-                                'searchKey': novelInfo.author,
-                              },
-                            );
-                            if (context.mounted) {
-                              context.read<NovelInfoCubit>().loadHistory();
-                            }
-                          },
-                  child: Text(
-                    '作者：${novelInfo.author}',
-                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                      color:
-                          source == SourceId.localEpub
-                              ? null
-                              : Theme.of(context).colorScheme.primary,
-                      decoration:
-                          source == SourceId.localEpub
-                              ? TextDecoration.none
-                              : TextDecoration.underline,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  '状态：${novelInfo.status}',
-                  style: Theme.of(context).textTheme.bodyMedium,
-                ),
-                if (novelInfo.isAnimated)
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                      '动画化',
-                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                    ),
-                  ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _StatItem extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final String value;
-  final VoidCallback? onTap;
-
-  const _StatItem({
-    required this.icon,
-    required this.label,
-    required this.value,
-    this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final row = Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        Icon(icon, size: 16, color: Theme.of(context).colorScheme.primary),
-        const SizedBox(width: 4),
-        value != ''
-            ? Text(
-              '$label: $value',
-              style: Theme.of(context).textTheme.bodySmall,
-            )
-            : Text(label, style: Theme.of(context).textTheme.bodySmall),
-      ],
-    );
-    if (onTap != null) {
-      return InkWell(onTap: onTap, child: row);
+    if (!listened &&
+        context.mounted &&
+        ModalRoute.of(context)?.isCurrent != false &&
+        scope == bookNavigationScope(novelId)) {
+      await cubit.loadHistory();
     }
-    return row;
   }
-}
-
-class _NovelDescription extends StatelessWidget {
-  final String description;
-
-  const _NovelDescription({required this.description});
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Text('简介', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          Html(
-            data: description,
-            style: {
-              'body': Style(
-                margin: Margins.zero,
-                padding: HtmlPaddings.zero,
-                fontFamily:
-                    Theme.of(context).textTheme.bodyMedium?.fontFamily ??
-                    appFontFamily,
-                fontSize: FontSize(14),
-                color: Theme.of(context).colorScheme.onSurface,
-              ),
-              'p': Style(margin: Margins.only(bottom: 8)),
-              'br': Style(margin: Margins.only(bottom: 8)),
-            },
-          ),
-        ],
-      ),
+    final state = this.state;
+    final source = sourceOf(novelId);
+    final key = ValueKey('book-details-$novelId');
+    final hint = BookDetailHint.lookup(novelId);
+    if (state is! NovelInfoLoaded) {
+      return BookDetailsView.loading(
+        key: key,
+        source: source,
+        hint: hint,
+        loading: SourceLoadingIndicator(source: source, requestKey: state),
+      );
+    }
+    final novelInfo = state.novelInfo;
+    final inShelf = context.select<BookshelfCubit, bool>(
+      (cubit) => cubit.state.isBookInBookshelf(novelId),
     );
-  }
-}
-
-class _NovelTags extends StatelessWidget {
-  final List<String> tags;
-  final SourceId source;
-
-  const _NovelTags({required this.tags, required this.source});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16.0),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children:
-            tags.map((tag) {
-              return InkWell(
-                onTap:
-                    source == SourceId.wenku8
-                        ? () => Navigator.pushNamed(
-                          context,
-                          '/category',
-                          arguments: {'tag': tag},
-                        )
-                        : null,
-                child: AppChip(
-                  label: Text(tag),
-                  backgroundColor:
-                      Theme.of(context).colorScheme.primaryContainer,
-                  labelStyle: TextStyle(
-                    color: Theme.of(context).colorScheme.onPrimaryContainer,
-                  ),
-                ),
-              );
-            }).toList(),
-      ),
-    );
-  }
-}
-
-class _VolumeItem extends StatelessWidget {
-  final Volume volume;
-  final Function(Chapter) onChapterTap;
-
-  const _VolumeItem({required this.volume, required this.onChapterTap});
-
-  @override
-  Widget build(BuildContext context) {
-    return AppleGlassCard(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(16),
-            child: Text(
-              volume.title,
-              style: Theme.of(
+    return BookDetailsView(
+      key: key,
+      info: novelInfo,
+      hint: hint,
+      volumes: state.volumes,
+      source: source,
+      resumeChapterId: state.readingHistory?.chapterId,
+      inShelf: inShelf,
+      onBookmark:
+          source == SourceId.localEpub
+              ? null
+              : () => _toggleBookShelf(context, novelId),
+      onComments:
+          w8.sourceSupportsComments(novelId)
+              ? () => Navigator.pushNamed(
                 context,
-              ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.bold),
-            ),
+                '/novel/reviews',
+                arguments: {'aid': novelId, 'title': novelInfo.title},
+              )
+              : null,
+      onAuthor:
+          w8.sourceSupportsAuthorSearch(source) &&
+                  novelInfo.author.trim().isNotEmpty
+              ? () async {
+                if (ModalRoute.of(context)?.isCurrent == false) return;
+                final cubit = context.read<NovelInfoCubit>();
+                final scope = bookNavigationScope(novelId);
+                await pushAndWaitForPageExit(
+                  context,
+                  HorizontalCoverPageRoute<void>(
+                    settings: RouteSettings(
+                      name: '/search',
+                      arguments: {
+                        'searchType': 'author',
+                        'searchKey': novelInfo.author,
+                      },
+                    ),
+                    builder:
+                        (_) => SearchPage(
+                          initialSearchType: 'author',
+                          initialSearchKey: novelInfo.author,
+                        ),
+                  ),
+                );
+                if (context.mounted &&
+                    ModalRoute.of(context)?.isCurrent != false &&
+                    scope == bookNavigationScope(novelId)) {
+                  await cubit.loadHistory();
+                }
+              }
+              : null,
+      onRead:
+          (chapter) => _navigateToReader(
+            context,
+            chapter.aid,
+            chapter.cid,
+            novelInfo.title,
           ),
-          const Divider(height: 1),
-          ...volume.chapters.map((chapter) {
-            return InkWell(
-              onTap: () => onChapterTap(chapter),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 12,
-                ),
-                child: Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        chapter.title,
-                        style: Theme.of(context).textTheme.bodyMedium,
-                      ),
-                    ),
-                    Icon(
-                      Icons.chevron_right,
-                      size: 20,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ],
-                ),
-              ),
-            );
-          }),
-        ],
-      ),
     );
+  }
+}
+
+Future<void> _toggleBookShelf(BuildContext context, String novelId) async {
+  final bookshelfCubit = context.read<BookshelfCubit>();
+  final isInBookshelf = bookshelfCubit.state.isBookInBookshelf(novelId);
+
+  try {
+    if (isInBookshelf) {
+      await bookshelfCubit.removeFromBookshelf(novelId);
+    } else {
+      await bookshelfCubit.addToBookshelf(novelId);
+    }
+  } catch (e) {
+    if (!context.mounted) return;
+    if (_isCfError(e)) {
+      final apiHost = context.read<ApiHostCubit>().state;
+      String actionPath;
+      if (isInBookshelf) {
+        final bid = bookshelfCubit.state.getBookBid(novelId);
+        if (bid == null) return;
+        actionPath = '/modules/article/bookcase.php?delid=$bid';
+      } else {
+        actionPath = '/modules/article/addbookcase.php?bid=$novelId';
+      }
+      showEinkAwareDialog(
+        context: context,
+        barrierDismissible: false,
+        builder:
+            (ctx) => Dialog.fullscreen(
+              child: CfActionLoader(
+                apiHost: apiHost,
+                actionPath: actionPath,
+                successUrlKeyword: 'bookcase.php',
+                successBodyKeyword: '处理成功',
+                onSuccess: () {
+                  Navigator.of(ctx).pop();
+                  bookshelfCubit.loadBookcases();
+                },
+                onError: (err) {
+                  Navigator.of(ctx).pop();
+                  ScaffoldMessenger.of(
+                    context,
+                  ).showSnackBar(SnackBar(content: Text('操作失敗: $err')));
+                },
+              ),
+            ),
+      );
+    } else {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('操作失败: $e')));
+    }
   }
 }

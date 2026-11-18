@@ -9,6 +9,7 @@ import android.os.Looper
 import android.os.SystemClock
 import android.view.InputDevice
 import android.view.MotionEvent
+import android.view.ViewConfiguration
 import android.widget.FrameLayout
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -57,6 +58,24 @@ class PTQBookPageCurlNativeView(
     private var announcedReadyIndex: Int? = null
     private var turnInProgress = false
     private var disposed = false
+    private val imageRegions = mutableMapOf<Int, List<android.graphics.RectF>>()
+    private val holdSlop = ViewConfiguration.get(context).scaledTouchSlop.toFloat()
+    private var holdX = 0f
+    private var holdY = 0f
+    private var holdDownTime = 0L
+    private var holdPage = -1
+    private var holdConsumed = false
+    private val selectOnHold = Runnable {
+        if (disposed || holdPage < 0 || readyIndex() != holdPage ||
+            width <= 0 || height <= 0 || !isAttachedToWindow) return@Runnable
+        // The same pointer must not release into PTQ's tap/turn recognizer.
+        holdConsumed = true
+        val cancel = MotionEvent.obtain(holdDownTime, SystemClock.uptimeMillis(),
+            MotionEvent.ACTION_CANCEL, holdX, holdY, 0)
+        composeView.dispatchTouchEvent(cancel)
+        cancel.recycle()
+        sendEvent("textHold", mapOf("index" to holdPage, "x" to holdX / width, "y" to holdY / height))
+    }
 
     private val composeView = ComposeView(context).apply {
         setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnDetachedFromWindow)
@@ -131,6 +150,9 @@ class PTQBookPageCurlNativeView(
                         val width = rightDown.x.coerceAtLeast(1f)
                         val height = rightDown.y.coerceAtLeast(1f)
                         when {
+                            imageRegions[pageIndex]?.any { it.contains(touchPoint.x / width, touchPoint.y / height) } == true -> {
+                                sendEvent("imageTap", mapOf("index" to pageIndex, "x" to touchPoint.x / width, "y" to touchPoint.y / height)); null
+                            }
                             !tapToTurnState.value -> { sendEvent("centerTap", null); null }
                             touchPoint.x < width * 0.30f || (!isSpread && touchPoint.y < height * 0.30f) -> false
                             touchPoint.x > width * 0.70f || (!isSpread && touchPoint.y > height * 0.70f) -> true
@@ -191,6 +213,44 @@ class PTQBookPageCurlNativeView(
             LayoutParams(LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT),
         )
         setBackgroundColor(AndroidColor.WHITE)
+    }
+
+    override fun dispatchTouchEvent(event: MotionEvent): Boolean {
+        val action = event.actionMasked
+        if (action == MotionEvent.ACTION_DOWN) {
+            mainHandler.removeCallbacks(selectOnHold)
+            holdConsumed = false
+            holdPage = -1
+            val current = readyIndex()
+            if (current != null && width > 0 && height > 0 &&
+                imageRegions[current]?.any { it.contains(event.x / width, event.y / height) } != true) {
+                holdX = event.x
+                holdY = event.y
+                holdDownTime = event.downTime
+                holdPage = current
+                mainHandler.postDelayed(selectOnHold, ViewConfiguration.getLongPressTimeout().toLong())
+            }
+        } else if (holdConsumed) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) holdConsumed = false
+            return true
+        } else if (action != MotionEvent.ACTION_MOVE ||
+            kotlin.math.abs(event.x - holdX) > holdSlop ||
+            kotlin.math.abs(event.y - holdY) > holdSlop) {
+            mainHandler.removeCallbacks(selectOnHold)
+            holdPage = -1
+        }
+        return super.dispatchTouchEvent(event)
+    }
+
+    fun setImageRegions(index: Int, regions: List<*>) {
+        imageRegions[index] = regions.take(256).mapNotNull { item ->
+            val rect = (item as? Map<*, *>)?.get("rect") as? List<*> ?: return@mapNotNull null
+            if (rect.size != 4) return@mapNotNull null
+            val values = rect.map { (it as? Number)?.toFloat() ?: return@mapNotNull null }
+            if (values.any { !it.isFinite() } || values[2] <= values[0] || values[3] <= values[1]) return@mapNotNull null
+            android.graphics.RectF(values[0], values[1], values[2], values[3])
+        }
+        imageRegions.keys.removeAll { kotlin.math.abs(it - pageIndexState.intValue) > 3 }
     }
 
     fun updateState(pageCount: Int, index: Int, paperColor: Int, isSpread: Boolean = false, tapToTurn: Boolean = true) {
@@ -342,6 +402,7 @@ class PTQBookPageCurlNativeView(
     fun dispose() {
         if (disposed) return
         disposed = true
+        mainHandler.removeCallbacks(selectOnHold)
         turnInProgress = false
         pendingProgrammaticDirection = null
         refreshPTQPages = null

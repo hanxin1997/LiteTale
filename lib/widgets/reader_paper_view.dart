@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:wild/models/reader_page.dart';
+import 'package:wild/models/reader_mark.dart';
 import 'package:wild/services/reader_viewport_layout.dart';
 import 'package:wild/theme/app_fonts.dart';
 import 'package:wild/sources/book_source.dart';
@@ -7,6 +8,10 @@ import 'package:wild/widgets/cached_image.dart';
 import 'package:wild/widgets/reader_raster_readiness.dart';
 import 'package:wild/widgets/reader_styled_paragraph.dart';
 import 'package:wild/services/epub/epub_css_reader.dart';
+import 'package:wild/services/reader_images.dart';
+import 'package:wild/widgets/reader_illustration.dart';
+import 'package:wild/widgets/reader_mark_selection.dart';
+import 'package:wild/widgets/reader_css_marks.dart';
 
 /// A real spread contains two independently paginated leaves. Text continues
 /// from the left leaf to the right, rather than being laid out across the seam.
@@ -22,6 +27,8 @@ class ReaderPaperView extends StatelessWidget {
     required this.paragraphSpacing,
     this.titleFontFamily = appFontFamily,
     this.highContrast = false,
+    this.marks,
+    this.markChapter,
   });
 
   final List<ReaderPage> pages;
@@ -34,23 +41,53 @@ class ReaderPaperView extends StatelessWidget {
   // Catalog titles are normal Unicode, never chapter-obfuscated glyph codes.
   final String titleFontFamily;
   final bool highContrast;
+  final ReaderMarkSelection? marks;
+  final ReaderMarkChapter? markChapter;
 
-  Widget _leaf(int index, {required bool showTitle}) => ReaderPaperLeaf(
-    key: ValueKey('reader-leaf-$index'),
-    page: index < pages.length ? pages[index] : null,
-    layout: layout,
-    chapterTitle:
-        showTitle
-            ? (index < pages.length
-                ? pages[index].chapterTitle ?? chapterTitle
-                : '')
-            : '',
-    source: source,
-    textStyle: textStyle,
-    paragraphSpacing: paragraphSpacing,
-    titleFontFamily: titleFontFamily,
-    highContrast: highContrast,
-  );
+  Widget _leaf(int index, {required bool showTitle}) {
+    final page = index < pages.length ? pages[index] : null;
+    final leaf = ReaderPaperLeaf(
+      key: ValueKey('reader-leaf-$index'),
+      page: page,
+      layout: layout,
+      chapterTitle:
+          showTitle
+              ? (index < pages.length
+                  ? pages[index].chapterTitle ?? chapterTitle
+                  : '')
+              : '',
+      source: source,
+      textStyle: textStyle,
+      paragraphSpacing: paragraphSpacing,
+      titleFontFamily: titleFontFamily,
+      highContrast: highContrast,
+      marks: marks,
+      markChapter:
+          markChapter == null || page?.chapterId == null
+              ? markChapter
+              : (aid: markChapter!.aid, cid: page!.chapterId!),
+      markTitle: page?.chapterTitle ?? chapterTitle,
+      markGroup: viewIndex,
+    );
+    // Fixed artwork has no text margins. Scale the complete page and its image
+    // hotspots together so the footer never masks an illustration.
+    if (page?.cssPage?.fixedLayout == true || page?.artworkText != null) {
+      return Padding(
+        padding: EdgeInsets.only(
+          bottom: layout.footerBottom + layout.footerHeight + 8,
+        ),
+        child: FittedBox(
+          fit: BoxFit.contain,
+          child: SizedBox(
+            width: layout.leafWidth,
+            height: layout.viewportSize.height,
+            child: leaf,
+          ),
+        ),
+      );
+    }
+    return leaf;
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -94,6 +131,63 @@ class ReaderPaperView extends StatelessWidget {
   }
 }
 
+class _CssIllustrations extends StatefulWidget {
+  const _CssIllustrations({required this.page});
+  final ReaderCssPage page;
+  @override
+  State<_CssIllustrations> createState() => _CssIllustrationsState();
+}
+
+class _CssIllustrationsState extends State<_CssIllustrations> {
+  late Future<List<ReaderCssImageRegion>> _images;
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  void _load() =>
+      _images = widget.page.readImages?.call() ?? Future.value(const []);
+  @override
+  void didUpdateWidget(_CssIllustrations oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.page.key != widget.page.key ||
+        oldWidget.page.index != widget.page.index) {
+      _load();
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => LayoutBuilder(
+    builder:
+        (context, constraints) => FutureBuilder(
+          future: _images,
+          builder:
+              (context, snapshot) => Stack(
+                children: [
+                  for (final image
+                      in snapshot.data ?? const <ReaderCssImageRegion>[])
+                    Positioned.fromRect(
+                      rect: Rect.fromLTRB(
+                        image.rect.left * constraints.maxWidth,
+                        image.rect.top * constraints.maxHeight,
+                        image.rect.right * constraints.maxWidth,
+                        image.rect.bottom * constraints.maxHeight,
+                      ),
+                      child: ReaderImageRegion(
+                        image: ReaderImageRef(
+                          source: SourceId.localEpub,
+                          url: image.key,
+                          readLocal: image.read,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+        ),
+  );
+}
+
 class ReaderPaperLeaf extends StatelessWidget {
   const ReaderPaperLeaf({
     super.key,
@@ -105,6 +199,10 @@ class ReaderPaperLeaf extends StatelessWidget {
     required this.paragraphSpacing,
     this.titleFontFamily = appFontFamily,
     this.highContrast = false,
+    this.marks,
+    this.markChapter,
+    this.markTitle,
+    this.markGroup = 0,
   });
 
   final ReaderPage? page;
@@ -115,6 +213,41 @@ class ReaderPaperLeaf extends StatelessWidget {
   final double paragraphSpacing;
   final String titleFontFamily;
   final bool highContrast;
+  final ReaderMarkSelection? marks;
+  final ReaderMarkChapter? markChapter;
+  final String? markTitle;
+  final int markGroup;
+
+  Widget _marked(int? offset, String text, Widget child) {
+    if (marks == null || offset == null || markChapter == null) return child;
+    return ReaderMarkedRegion(
+      selection: marks!,
+      group: markGroup,
+      text: text,
+      location: ReaderMarkLocation(
+        markChapter!,
+        markTitle ?? chapterTitle,
+        ReaderMarkAxis.text,
+        offset,
+      ),
+      child: child,
+    );
+  }
+
+  Widget _illustration(String url, Widget error) {
+    // The preview hotspot resolves this provider too. Share the paper's static
+    // frame so measuring or opening a GIF cannot start a second animation.
+    final provider = CachedImageProvider(
+      url,
+      source: source,
+      staticFrame: highContrast,
+    );
+    return ReaderIllustration(
+      image: ReaderImageRef(source: source, url: url),
+      provider: provider,
+      child: ReaderRasterImage(image: provider, errorChild: error),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -135,6 +268,19 @@ class ReaderPaperLeaf extends StatelessWidget {
                 child: Text('页面加载失败，请重新打开本章', style: textStyle),
               ),
             ),
+            if (marks != null && markChapter != null)
+              ReaderCssMarks(
+                page: page!.cssPage!,
+                selection: marks!,
+                group: markGroup,
+                location: ReaderMarkLocation(
+                  markChapter!,
+                  markTitle ?? chapterTitle,
+                  ReaderMarkAxis.epubDom,
+                  page!.cssPage!.domStart,
+                ),
+              ),
+            _CssIllustrations(page: page!.cssPage!),
             if (chapterTitle.isNotEmpty &&
                 layout.headerHeight > 0 &&
                 !page!.cssPage!.fixedLayout)
@@ -164,9 +310,9 @@ class ReaderPaperLeaf extends StatelessWidget {
         label: page!.artworkText,
         child: ColoredBox(
           color: Colors.white,
-          child: ReaderRasterImage(
-            image: CachedImageProvider(page!.content, source: source),
-            errorChild: Center(child: Text('特殊页面加载失败', style: textStyle)),
+          child: _illustration(
+            page!.content,
+            Center(child: Text('特殊页面加载失败', style: textStyle)),
           ),
         ),
       );
@@ -209,9 +355,9 @@ class ReaderPaperLeaf extends StatelessWidget {
             width: layout.contentWidth,
             child:
                 page!.isImage
-                    ? ReaderRasterImage(
-                      image: CachedImageProvider(content, source: source),
-                      errorChild: Center(
+                    ? _illustration(
+                      content,
+                      Center(
                         child: Text(
                           '图片加载失败',
                           style: textStyle.copyWith(fontSize: 14),
@@ -223,11 +369,15 @@ class ReaderPaperLeaf extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         for (final fragment in page!.fragments!)
-                          ReaderStyledParagraph(
-                            fragment: fragment,
-                            style: textStyle,
-                            textScaler: layout.textScaler,
-                            highContrast: highContrast,
+                          _marked(
+                            fragment.sourceOffset,
+                            fragment.text,
+                            ReaderStyledParagraph(
+                              fragment: fragment,
+                              highContrast: highContrast,
+                              style: textStyle,
+                              textScaler: layout.textScaler,
+                            ),
                           ),
                       ],
                     )
@@ -235,14 +385,18 @@ class ReaderPaperLeaf extends StatelessWidget {
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
                         for (var i = 0; i < paragraphs.length; i++) ...[
-                          RichText(
-                            text: TextSpan(
-                              text: paragraphs[i],
-                              style: textStyle,
+                          _marked(
+                            page!.paragraphOffsets?[i],
+                            paragraphs[i],
+                            RichText(
+                              text: TextSpan(
+                                text: paragraphs[i],
+                                style: textStyle,
+                              ),
+                              textDirection: TextDirection.ltr,
+                              textScaler: layout.textScaler,
+                              strutStyle: StrutStyle.fromTextStyle(textStyle),
                             ),
-                            textDirection: TextDirection.ltr,
-                            textScaler: layout.textScaler,
-                            strutStyle: StrutStyle.fromTextStyle(textStyle),
                           ),
                           if (i + 1 < paragraphs.length)
                             SizedBox(height: paragraphSpacing),

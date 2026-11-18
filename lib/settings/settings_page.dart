@@ -1,4 +1,5 @@
 import 'package:wild/widgets/apple_glass_chrome.dart';
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:wild/pages/home/font_settings_page.dart';
@@ -14,12 +15,61 @@ import 'package:wild/eink/eink_preferences.dart';
 
 /// The former settings entry now opens display preferences directly.
 class SettingsPage extends StatelessWidget {
-  const SettingsPage({super.key});
+  const SettingsPage({super.key, this.appearanceOnly = false});
+
+  final bool appearanceOnly;
 
   @override
   Widget build(BuildContext context) {
     final preferences = context.watch<SettingsPreferencesCubit>();
     final prefs = preferences.state;
+    Future<void> chooseVariant() async {
+      final v = await chooseSetting(
+        context,
+        '汉字变体',
+        hanVariantNames,
+        prefs.hanVariant,
+      );
+      if (v != null && context.mounted) {
+        await settingsAction(
+          context,
+          () => preferences.update((s) => s.copyWith(hanVariant: v)),
+        );
+      }
+    }
+
+    if (appearanceOnly) {
+      return Scaffold(
+        appBar: settingsAppBar(context, '外观'),
+        body: LeftAlignedScrollView(
+          bottomInset: 28,
+          child: IosSettingsSection(
+            title: '显示',
+            rows: [
+              IosSettingsRow(
+                icon: CupertinoIcons.paintbrush,
+                title: '主题与纸张',
+                description: '深浅色、配色、应用图标与阅读背景',
+                onTap: () => openSettingsPage(context, const ThemePaperPage()),
+              ),
+              IosSettingsRow(
+                icon: CupertinoIcons.textformat_size,
+                title: '字体设置',
+                description: '全局界面字体与小说阅读字体',
+                onTap:
+                    () => openSettingsPage(context, const FontSettingsPage()),
+              ),
+              IosSettingsRow(
+                icon: CupertinoIcons.textformat,
+                title: '汉字变体',
+                description: hanVariantNames[prefs.hanVariant] ?? '选择地区字形',
+                onTap: chooseVariant,
+              ),
+            ],
+          ),
+        ),
+      );
+    }
     return Scaffold(
       appBar: AppBar(title: const Text('显示')),
       body: LeftAlignedScrollView(
@@ -54,7 +104,10 @@ class SettingsPage extends StatelessWidget {
               SettingsEntry(
                 icon: Icons.chrome_reader_mode_outlined,
                 title: '阅读显示',
-                description: '字号、行距、页边距、翻页效果与音量键翻页',
+                description:
+                    usesAppleGlass
+                        ? '字号、行距、页边距和翻页效果'
+                        : '字号、行距、页边距、翻页效果与音量键翻页',
                 trailing: const Icon(Icons.chevron_right_rounded),
                 onTap:
                     () => openSettingsPage(context, const ReaderSettingsPage()),
@@ -65,21 +118,7 @@ class SettingsPage extends StatelessWidget {
                 description: '选择字体支持的地区字形',
                 option: hanVariantNames[prefs.hanVariant],
                 trailing: const Icon(Icons.chevron_right_rounded),
-                onTap: () async {
-                  final v = await chooseSetting(
-                    context,
-                    '汉字变体',
-                    hanVariantNames,
-                    prefs.hanVariant,
-                  );
-                  if (v != null && context.mounted) {
-                    await settingsAction(
-                      context,
-                      () =>
-                          preferences.update((s) => s.copyWith(hanVariant: v)),
-                    );
-                  }
-                },
+                onTap: chooseVariant,
               ),
             ],
           ),

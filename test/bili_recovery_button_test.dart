@@ -2,8 +2,11 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:wild/pages/search_page.dart';
 import 'package:wild/services/bili_browser.dart';
+import 'package:wild/services/read_request.dart';
 import 'package:wild/sources/book_source.dart';
+import 'package:wild/src/rust/api/wenku8.dart' show PageStatsNovelCover;
 import 'package:wild/widgets/bili_recovery_button.dart';
 
 void main() {
@@ -111,6 +114,133 @@ void main() {
     );
     expect(find.byType(OutlinedButton), findsNothing);
   });
+
+  testWidgets(
+    'each search can open a new CAPTCHA and cancellation keeps the query',
+    (tester) async {
+      final navigator = GlobalKey<NavigatorState>();
+      final target = Uri.parse('https://www.bilinovel.net/search.html');
+      var searches = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: navigator,
+          home: SearchPage(
+            initialSearchKey: '新约',
+            historyLoader: () async => [],
+            searcher: ({
+              required searchType,
+              required searchKey,
+              required page,
+            }) async {
+              searches++;
+              throw BiliSiteVerificationRequired(
+                target: target,
+                kind: BiliProbeKind.searchResults,
+                revision: sourceRevision.value,
+                searchChallenge: true,
+                searchEntry: target,
+                searchKeyword: searchKey,
+                searchPage: page,
+              );
+            },
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('搜索验证'), findsOneWidget);
+      navigator.currentState!.pop(false);
+      await tester.pumpAndSettle();
+      expect(find.text('搜索验证'), findsNothing);
+      expect(find.text('新约'), findsOneWidget);
+      expect(find.text('打开哔哩原站验证'), findsOneWidget);
+      expect(searches, 1);
+      await tester.enterText(find.byType(TextField), '海床');
+      await tester.tap(find.byTooltip('执行搜索'));
+      await tester.pumpAndSettle();
+      expect(find.text('搜索验证'), findsOneWidget);
+      expect(searches, 2);
+      navigator.currentState!.pop(false);
+      await tester.pumpAndSettle();
+      expect(find.text('海床'), findsOneWidget);
+    },
+  );
+  testWidgets('opens the same Bili search while it is loading', (tester) async {
+    final target = Uri.parse('https://www.bilinovel.net/search.html');
+    final loading = Completer<PageStatsNovelCover>();
+    late BiliSearchRequest owner;
+    var calls = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SearchPage(
+          initialSearchKey: '魔法禁书',
+          historyLoader: () async => [],
+          searcher: ({required searchType, required searchKey, required page}) {
+            owner = ReadRequest.current! as BiliSearchRequest;
+            calls++;
+            return loading.future;
+          },
+        ),
+      ),
+    );
+    await tester.tap(find.text('在应用内继续搜索'));
+    await tester.pump();
+    expect(owner.openOriginalPage, isTrue);
+    expect(find.text('正在打开原站…'), findsOneWidget);
+
+    loading.completeError(
+      BiliSiteVerificationRequired(
+        target: target,
+        kind: BiliProbeKind.searchResults,
+        revision: sourceRevision.value,
+        manualSearch: true,
+        searchKeyword: '魔法禁书',
+        searchEntry: target,
+        searchPage: 1,
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('原站搜索'), findsOneWidget);
+    expect(calls, 1);
+  });
+
+  testWidgets('a stalled search offers the original page on demand', (
+    tester,
+  ) async {
+    final target = Uri.parse('https://www.bilinovel.net/search.html');
+    await tester.pumpWidget(
+      MaterialApp(
+        home: SearchPage(
+          initialSearchKey: '一周一次买下',
+          historyLoader: () async => [],
+          searcher: ({
+            required searchType,
+            required searchKey,
+            required int page,
+          }) async {
+            throw BiliSiteVerificationRequired(
+              target: target,
+              kind: BiliProbeKind.searchResults,
+              revision: sourceRevision.value,
+              manualSearch: true,
+              searchKeyword: searchKey,
+              searchEntry: target,
+              searchPage: page,
+            );
+          },
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    expect(find.text('在应用内继续搜索'), findsOneWidget);
+    expect(find.text('搜索未完成'), findsNothing);
+    expect(find.text('重试'), findsNothing);
+    expect(find.text('原站搜索'), findsNothing);
+    await tester.tap(find.text('在应用内继续搜索'));
+    await tester.pumpAndSettle();
+    expect(find.text('原站搜索'), findsOneWidget);
+    expect(find.text('返回搜索结果'), findsOneWidget);
+  });
+
   testWidgets(
     'partial content offers a reading flow and retries after confirmation',
     (tester) async {

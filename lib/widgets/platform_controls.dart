@@ -1,7 +1,8 @@
+import 'package:wild/eink/eink_policy.dart';
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:wild/eink/eink_policy.dart';
+import 'package:wild/theme/ios_glass_theme.dart' show iosGroupedCardShape;
 import 'package:wild/widgets/apple_glass_chrome.dart';
 import 'package:wild/theme/ios_system_colors.dart';
 import 'package:wild/theme/material_you.dart';
@@ -252,13 +253,7 @@ class AppButton extends StatelessWidget {
       ),
     );
     if (_kind == _ButtonKind.text) return button;
-    return AppleGlassSurface(
-      tint:
-          _kind == _ButtonKind.filled || _kind == _ButtonKind.elevated
-              ? colors.primary.withValues(alpha: .12)
-              : null,
-      child: button,
-    );
+    return AppleGlassSurface(child: button);
   }
 }
 
@@ -395,6 +390,8 @@ class AppSlider extends StatelessWidget {
     this.label,
     this.onChangeStart,
     this.onChangeEnd,
+    this.onChangeCancel,
+    this.interactionRevision,
     this.activeColor,
     this.inactiveColor,
   });
@@ -402,11 +399,13 @@ class AppSlider extends StatelessWidget {
   final int? divisions;
   final String? label;
   final ValueChanged<double>? onChanged, onChangeStart, onChangeEnd;
+  final VoidCallback? onChangeCancel;
+  final Object? interactionRevision;
   final Color? activeColor, inactiveColor;
   @override
   Widget build(BuildContext context) =>
       usesAppleGlass
-          ? CupertinoSlider(
+          ? AppleGlassSlider(
             value: value.clamp(min, max),
             min: min,
             max: max,
@@ -414,9 +413,11 @@ class AppSlider extends StatelessWidget {
             onChanged: onChanged,
             onChangeStart: onChangeStart,
             onChangeEnd: onChangeEnd,
+            onChangeCancel: onChangeCancel,
+            interactionRevision: interactionRevision,
             activeColor: activeColor ?? Theme.of(context).colorScheme.primary,
           )
-          : Slider(
+          : Slider.adaptive(
             value: value,
             min: min,
             max: max,
@@ -927,16 +928,19 @@ class AppChip extends StatelessWidget {
     this.backgroundColor,
     this.padding,
     this.labelStyle,
+    this.capsule = false,
   });
   final Widget label;
   final TextStyle? labelStyle;
   final Widget? avatar;
   final Color? backgroundColor;
   final EdgeInsetsGeometry? padding;
+  final bool capsule;
   @override
   Widget build(BuildContext context) =>
       usesAppleGlass
           ? AppleGlassSurface(
+            capsule: capsule,
             child: Padding(
               padding:
                   padding ??
@@ -981,6 +985,7 @@ Future<T?> showAppBottomSheet<T>({
   bool enableDrag = true,
   bool? showDragHandle,
   BoxConstraints? constraints,
+  bool useGlass = true,
 }) {
   if (einkEnabled(context, listen: false)) {
     // Keep dismissal/navigation semantics, but neither animate the sheet nor
@@ -1034,12 +1039,30 @@ Future<T?> showAppBottomSheet<T>({
                         MediaQuery.sizeOf(sheetContext).height *
                         (isScrollControlled ? .92 : .6),
                   ),
-              child: AppleGlassSurface(
-                child: Material(
-                  type: MaterialType.transparency,
-                  child: SafeArea(top: false, child: builder(sheetContext)),
-                ),
-              ),
+              child:
+                  useGlass
+                      ? AppleGlassSurface(
+                        child: Material(
+                          type: MaterialType.transparency,
+                          child: SafeArea(
+                            top: false,
+                            child: builder(sheetContext),
+                          ),
+                        ),
+                      )
+                      : Material(
+                        color:
+                            backgroundColor ??
+                            Theme.of(
+                              sheetContext,
+                            ).colorScheme.surfaceContainerLowest,
+                        shape: iosGroupedCardShape,
+                        clipBehavior: Clip.antiAlias,
+                        child: SafeArea(
+                          top: false,
+                          child: builder(sheetContext),
+                        ),
+                      ),
             ),
           ),
         ),

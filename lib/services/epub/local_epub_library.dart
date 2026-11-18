@@ -12,6 +12,8 @@ import 'epub_models.dart';
 import 'epub_parser.dart';
 import 'epub_artwork_renderer.dart';
 import 'epub_publication_document.dart';
+import 'local_epub_organization.dart';
+import 'epub_import_queue.dart';
 
 typedef EpubBookParser =
     ParsedEpubBook Function(Uint8List bytes, {String fallbackTitle});
@@ -50,6 +52,14 @@ class LocalEpubLibrary extends ChangeNotifier {
        _rasterizeArtwork = rasterizeArtwork ?? rasterizeEpubArtwork;
 
   static final instance = LocalEpubLibrary();
+
+  final organization = LocalEpubOrganizationStore();
+  EpubImportQueue? _imports;
+  EpubImportQueue get imports =>
+      _imports ??= EpubImportQueue(
+        importFile: importFile,
+        organization: organization,
+      );
 
   final EpubBookParser _parser;
   final bool _useIsolates;
@@ -142,6 +152,8 @@ class LocalEpubLibrary extends ChangeNotifier {
       _documentCache.clear();
       _loadWarnings = snapshot.warnings;
       _initializationError = null;
+      // A damaged organization record must not prevent reading valid books.
+      await organization.initialize(privateRoot);
       notifyListeners();
     } catch (_) {
       _initializationError = '本地书库初始化失败，请检查存储空间后重试';
@@ -259,22 +271,6 @@ class LocalEpubLibrary extends ChangeNotifier {
 
   Future<String> chapter(String bookId, String chapterId) async =>
       (await chapterData(bookId, chapterId)).content;
-
-  /// Exports the verified, app-owned original without rebuilding its EPUB/CSS.
-  Future<File> originalFileForOpening(String bookId) async {
-    final record = _record(bookId), revision = revisionFor(bookId);
-    final entry = record.publication;
-    if (entry == null) {
-      throw const EpubImportException('请重新导入原 EPUB 后在图书中打开');
-    }
-    final bytes = await _readOwned(record, entry.file, entry.length);
-    await _background(_verifyAssetJob, (bytes, entry.length, entry.digest));
-    _assertCurrent(record, revision);
-    return _checkedFile(
-      record.directoryOverride ?? _join(_requireBase(), record.book.digest),
-      entry.file,
-    );
-  }
 
   Future<EpubPublicationDocument> publication(
     String bookId,
@@ -411,6 +407,13 @@ class LocalEpubLibrary extends ChangeNotifier {
     _assetCache.clear();
     _publicationCache.clear();
     _documentCache.clear();
+    if (organization.isReady) {
+      try {
+        await organization.forgetBook(bookId);
+      } catch (_) {
+        _loadWarnings = [..._loadWarnings, '书籍已移除，但分类记录未能清理。'];
+      }
+    }
     notifyListeners();
     if (type != FileSystemEntityType.directory) return;
 
@@ -508,6 +511,13 @@ class LocalEpubLibrary extends ChangeNotifier {
       }
     });
     return completion.future;
+  }
+
+  @override
+  void dispose() {
+    _imports?.dispose();
+    organization.dispose();
+    super.dispose();
   }
 }
 

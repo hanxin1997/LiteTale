@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
+import 'book_card_ink.dart';
 import 'apple_book_cover.dart';
 import 'package:wild/theme/material_you.dart';
 import 'package:wild/sources/book_source.dart';
-import 'package:wild/widgets/cached_image.dart';
+import 'package:wild/widgets/book_cover_image.dart';
+import 'package:wild/models/book_detail_hint.dart';
 import 'package:wild/src/rust/wenku8/models.dart';
 
 class NovelCard extends StatelessWidget {
@@ -18,6 +20,7 @@ class NovelCard extends StatelessWidget {
   final EdgeInsetsGeometry? padding;
   final bool showAuthor;
   final SourceId source;
+  final Widget? coverBadge;
 
   const NovelCard({
     super.key,
@@ -32,6 +35,7 @@ class NovelCard extends StatelessWidget {
     this.elevation = 0.5,
     this.padding,
     this.showAuthor = true,
+    this.coverBadge,
     required this.source,
   });
 
@@ -51,7 +55,13 @@ class NovelCard extends StatelessWidget {
       title: novel.title,
       coverUrl: novel.coverUrl,
       author: novel.author,
-      onTap: onTap,
+      onTap:
+          onTap == null
+              ? null
+              : () {
+                BookDetailHint.remember(novel.id, novel.title, novel.coverUrl);
+                onTap();
+              },
       width: width,
       height: height,
       fit: fit,
@@ -78,7 +88,13 @@ class NovelCard extends StatelessWidget {
     return NovelCard(
       title: novel.title,
       coverUrl: novel.img,
-      onTap: onTap,
+      onTap:
+          onTap == null
+              ? null
+              : () {
+                BookDetailHint.remember(novel.aid, novel.title, novel.img);
+                onTap();
+              },
       width: width,
       height: height,
       fit: fit,
@@ -100,32 +116,44 @@ class NovelCard extends StatelessWidget {
         author: showAuthor ? author : null,
         showAuthor: showAuthor,
         onTap: onTap,
+        coverBadge: coverBadge,
       );
     }
     final cardRadius =
         borderRadius ?? BorderRadius.circular(usesMaterialYou ? 16 : 4);
     final logicalCoverWidth =
         width != null && width!.isFinite && width! > 0 ? width! : 220.0;
+    final cover = BookCoverImage(
+      url: coverUrl,
+      source: source,
+      fit: fit,
+      width: width ?? double.infinity,
+      height: height,
+      cacheWidth:
+          (logicalCoverWidth * MediaQuery.devicePixelRatioOf(context)).ceil(),
+    );
+    final badge = coverBadge;
     return Card(
       clipBehavior: Clip.antiAlias,
       elevation: elevation,
       shape: RoundedRectangleBorder(borderRadius: cardRadius),
-      child: InkWell(
+      child: BookCardInk(
+        borderRadius: cardRadius,
         onTap: onTap,
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Expanded(
-              child: CachedImage(
-                url: coverUrl,
-                source: source,
-                fit: fit,
-                width: width ?? double.infinity,
-                height: height,
-                cacheWidth:
-                    (logicalCoverWidth * MediaQuery.devicePixelRatioOf(context))
-                        .ceil(),
-              ),
+              child:
+                  badge == null
+                      ? cover
+                      : Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          cover,
+                          Positioned(top: 0, left: 0, child: badge),
+                        ],
+                      ),
             ),
             Padding(
               padding: padding ?? EdgeInsets.all(usesMaterialYou ? 10 : 4),

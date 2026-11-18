@@ -4,21 +4,21 @@
   <p>基于 Wild 的 Android 与 iOS 轻小说阅读器</p>
 
 [![license](https://img.shields.io/github/license/metaMMY07/LiteTale)](LICENSE)
-[![release](https://img.shields.io/badge/release-v1.2.2-blue)](https://github.com/metaMMY07/LiteTale/releases)
+[![上游版本](https://img.shields.io/badge/release-v1.2.5--fix-blue)](https://github.com/metaMMY07/LiteTale/releases/tag/v1.2.5-fix)
 [![downloads](https://img.shields.io/github/downloads/metaMMY07/LiteTale/total)](https://github.com/metaMMY07/LiteTale/releases)
 </div>
 
-## 最新正式版 LiteTale 1.2.2
+## Android 墨水屏版
 
-[Android 手机／平板 APK](https://github.com/metaMMY07/LiteTale/releases/download/v1.2.2/LiteTale-v1.2.2-android-arm64-v8a.apk) · [Android x86_64 APK](https://github.com/metaMMY07/LiteTale/releases/download/v1.2.2/LiteTale-v1.2.2-android-x86_64.apk) · [iPhone／iPad IPA（未签名）](https://github.com/metaMMY07/LiteTale/releases/download/v1.2.2/LiteTale-v1.2.2-ios-unsigned.ipa) · [更新内容](https://github.com/metaMMY07/LiteTale/releases/tag/v1.2.2)
+从[本分支发布页](https://github.com/hanxin1997/LiteTale/releases)下载 Android APK。安装后在「我的 → 显示 → 墨水屏模式」开启白底深色文字和静态翻页。这个开关默认关闭。
+
+## 上游原版 LiteTale 1.2.5 修复版
+
+[Android 手机／平板 APK](https://github.com/metaMMY07/LiteTale/releases/download/v1.2.5-fix/LiteTale-v1.2.5-fix-android-arm64-v8a.apk) · [iPhone／iPad IPA（未签名）](https://github.com/metaMMY07/LiteTale/releases/download/v1.2.5-fix/LiteTale-v1.2.5-fix-ios-unsigned.ipa) · [上游发布说明](https://github.com/metaMMY07/LiteTale/releases/tag/v1.2.5-fix)
 
 iOS 安装包需要自行签名后安装。
 
-### 相比 v1.2.0
-
-- 阅读页加入章节进度跳转和浮动工具栏，改进连续滑动翻页及音量键翻页。
-- 调整详情页收藏与书评入口，优化阅读菜单外观和深色模式。
-- Android 章节目录恢复完整页面，阅读设置支持半屏预览与轻扫展开。
+据上游发布说明，这一版改进了书架操作和 Android 底栏显示。
 
 ### 界面预览
 
@@ -40,13 +40,13 @@ iOS 安装包需要自行签名后安装。
 ### 功能
 
 - 在哔哩轻小说、文库8、轻书架与轻小说百科之间切换，也可以导入自定义规则书源；各书源的账号、书架和阅读记录分别保存。
-- 支持 EPUB 2/3 图文书：Android 可在应用内离线阅读并保留常见原书 CSS；iOS 可将原书交给 Apple Books 阅读。
+- 支持 EPUB 2/3 图文书：Android 可在应用内离线阅读并保留常见原书 CSS。iOS 沿用上游正式版的在线阅读入口。
 - 支持搜索、书籍详情、目录与阅读；增加哔哩轻小说原站读取和验证恢复入口，并持续改进文库8与轻书架的读取稳定性。
 - iOS 使用系统配色和液态玻璃控件；Android 保留原有 Material You 界面。Android 支持平板横屏双页和仿真翻页，iOS 使用普通翻页。
 - 分别导入全局界面字体和阅读字体，支持 TTF／OTF；加密章节继续使用书源所需字体，避免乱码。
 - 书源导入支持 LiteTale JSON 和 Legado JSON 的部分 CSS／JSON 规则；不执行外部脚本。
 
-APK 使用与既有版本相同的 Android Debug 签名，适合直接安装和从同签名版本升级；目前不用于 Google Play 等商店分发。
+墨水屏版使用本分支的固定签名，后续版本可覆盖升级。从上游原版切换前请先备份阅读数据，两者的 APK 签名不同。
 
 ## 构建
 

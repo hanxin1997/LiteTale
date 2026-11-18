@@ -1,3 +1,6 @@
+import 'dart:async';
+
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:wild/eink/eink_navigation.dart';
 import 'package:wild/eink/eink_policy.dart';
@@ -12,13 +15,16 @@ import 'package:wild/pages/home/bookshelf_cubit.dart';
 import 'package:wild/pages/update_cubit.dart';
 import 'package:wild/sources/source_api.dart';
 import 'package:wild/widgets/fluid_navigation_bar.dart';
+import 'package:wild/widgets/fluid_navigation_glyph.dart';
 import 'package:wild/widgets/apple_glass_chrome.dart';
 
 import 'home/bookshelf_page.dart';
 import 'home/history_page.dart';
 
 class HomePage extends StatefulWidget {
-  const HomePage({super.key});
+  const HomePage({super.key, this.tabSelection});
+
+  final ValueListenable<int>? tabSelection;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -27,13 +33,31 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   int _currentIndex = 0;
   late final HistoryCubit _historyCubit;
+  late final StreamSubscription<AuthState> _authSubscription;
+  late List<Widget> _tabPages = _createTabPages();
+
+  List<Widget> _createTabPages() {
+    final sourceKey = '${activeSource.value}:${sourceRevision.value}';
+    return [
+      IndexPage(key: ValueKey('index:$sourceKey')),
+      const BookshelfPage(),
+      HistoryPage(key: ValueKey('history:$sourceKey')),
+      MorePage(key: ValueKey(activeSource.value)),
+    ];
+  }
 
   @override
   void initState() {
     super.initState();
+    _currentIndex = widget.tabSelection?.value ?? 0;
+    widget.tabSelection?.addListener(_selectExternalTab);
     _historyCubit = HistoryCubit()..load();
     // 加载书架数据
     _loadBookshelf();
+    _authSubscription = context.read<AuthCubit>().stream.listen((_) {
+      if (mounted) _loadBookshelf();
+    });
+    wenku8ShelfRevision.addListener(_wenku8ScopeChanged);
     activeSource.addListener(_sourceChanged);
     sourceRevision.addListener(_sourceChanged);
     // 自动签到
@@ -69,25 +93,51 @@ class _HomePageState extends State<HomePage> {
 
   @override
   void dispose() {
+    widget.tabSelection?.removeListener(_selectExternalTab);
     activeSource.removeListener(_sourceChanged);
     sourceRevision.removeListener(_sourceChanged);
+    wenku8ShelfRevision.removeListener(_wenku8ScopeChanged);
+    unawaited(_authSubscription.cancel());
     _historyCubit.close();
     super.dispose();
   }
 
+  @override
+  void didUpdateWidget(covariant HomePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.tabSelection != widget.tabSelection) {
+      oldWidget.tabSelection?.removeListener(_selectExternalTab);
+      widget.tabSelection?.addListener(_selectExternalTab);
+      _selectExternalTab();
+    }
+  }
+
+  void _selectExternalTab() {
+    if (widget.tabSelection case final tabs?) {
+      _onDestinationSelected(tabs.value);
+    }
+  }
+
   void _loadBookshelf() {
     final shelf = context.read<BookshelfCubit>();
-    if (activeSource.value == SourceId.wenku8 &&
-        context.read<AuthCubit>().state.status != AuthStatus.authenticated) {
-      shelf.resetForGuest();
-    } else {
-      shelf.loadBookcases();
+    final enabled =
+        context.read<AuthCubit>().state.status == AuthStatus.authenticated;
+    shelf.setWenku8Enabled(enabled);
+    unawaited(shelf.loadLocalShelves());
+    if (enabled &&
+        (activeSource.value == SourceId.wenku8 || _currentIndex == 1) &&
+        shelf.state.status == BookshelfStatus.initial) {
+      unawaited(shelf.loadBookcases());
     }
+  }
+
+  void _wenku8ScopeChanged() {
+    if (mounted) context.read<BookshelfCubit>().invalidateWenku8();
   }
 
   void _sourceChanged() {
     if (!mounted) return;
-    setState(() {});
+    setState(() => _tabPages = _createTabPages());
     _loadBookshelf();
     _historyCubit.load();
     _autoSign();
@@ -100,8 +150,12 @@ class _HomePageState extends State<HomePage> {
       });
       // 切换到历史页面时刷新数据
       if (index == 2) {
-        _historyCubit.load();
+        _historyCubit.load(keepContent: true);
       }
+    }
+    if (index == 1) {
+      _loadBookshelf();
+      unawaited(context.read<BookshelfCubit>().refreshUnreadCounts());
     }
   }
 
@@ -121,16 +175,19 @@ class _HomePageState extends State<HomePage> {
               selectedIcon:
                   usesMaterialYou ? Icons.explore_rounded : Icons.home,
               label: usesMaterialYou ? '发现' : '首页',
+              symbol: FluidNavSymbol.compass,
             ),
             const FluidNavigationDestination(
               icon: Icons.bookmarks_outlined,
               selectedIcon: Icons.bookmarks_rounded,
               label: '书架',
+              symbol: FluidNavSymbol.ribbonBook,
             ),
             const FluidNavigationDestination(
               icon: Icons.history_outlined,
               selectedIcon: Icons.history_rounded,
               label: '历史',
+              symbol: FluidNavSymbol.history,
             ),
             FluidNavigationDestination(
               icon:
@@ -140,42 +197,20 @@ class _HomePageState extends State<HomePage> {
               selectedIcon:
                   usesMaterialYou ? Icons.person_rounded : Icons.more_horiz,
               label: usesMaterialYou ? '我的' : '更多',
+              symbol: FluidNavSymbol.person,
               showBadge: state.updateInfo != null,
             ),
           ];
           return Scaffold(
-            extendBody: !eink && (usesMaterialYou || usesAppleGlass),
+            extendBody:
+                !eink &&
+                (usesMaterialYou ||
+                    (usesAppleGlass && widget.tabSelection == null)),
             body: IndexedStack(
               index: _currentIndex,
               children: [
-                TickerMode(
-                  enabled: _currentIndex == 0,
-                  child: IndexPage(
-                    key: ValueKey(
-                      'index:${activeSource.value}:${sourceRevision.value}',
-                    ),
-                  ),
-                ),
-                TickerMode(
-                  enabled: _currentIndex == 1,
-                  child: BookshelfPage(
-                    key: ValueKey(
-                      'shelf:${activeSource.value}:${sourceRevision.value}',
-                    ),
-                  ),
-                ),
-                TickerMode(
-                  enabled: _currentIndex == 2,
-                  child: HistoryPage(
-                    key: ValueKey(
-                      'history:${activeSource.value}:${sourceRevision.value}',
-                    ),
-                  ),
-                ),
-                TickerMode(
-                  enabled: _currentIndex == 3,
-                  child: MorePage(key: ValueKey(activeSource.value)),
-                ),
+                for (var i = 0; i < _tabPages.length; i++)
+                  TickerMode(enabled: _currentIndex == i, child: _tabPages[i]),
               ],
             ),
             bottomNavigationBar:
@@ -194,10 +229,12 @@ class _HomePageState extends State<HomePage> {
                       onDestinationSelected: _onDestinationSelected,
                     )
                     : usesAppleGlass
-                    ? AppleGlassBottomBar(
-                      index: _currentIndex,
-                      onSelect: _onDestinationSelected,
-                    )
+                    ? (widget.tabSelection == null
+                        ? AppleGlassBottomBar(
+                          index: _currentIndex,
+                          onSelect: _onDestinationSelected,
+                        )
+                        : null)
                     : usesMaterialYou
                     ? FluidNavigationBar(
                       destinations: destinations,

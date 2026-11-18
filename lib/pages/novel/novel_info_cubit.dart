@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:wild/services/read_request.dart';
 import 'package:wild/services/read_diagnostics.dart';
+import 'package:wild/services/reading_progress.dart';
 import 'package:wild/utils/wenku8_network_error.dart';
 import 'package:wild/sources/book_source.dart';
 import 'package:wild/sources/source_api.dart' as w8;
@@ -39,6 +40,8 @@ class NovelInfoCubit extends Cubit<NovelInfoState> {
   final String novelId;
   List<Volume> _volumes = [];
   int _loadGeneration = 0;
+  int _historyGeneration = 0;
+  w8.ReadingHistory? _listeningHistory;
   ReadRequest? _readRequest;
   final Future<SourceBookDetail> Function({required String aid}) _loadDetail;
   final Future<w8.ReadingHistory?> Function({required String novelId})
@@ -135,7 +138,7 @@ class NovelInfoCubit extends Cubit<NovelInfoState> {
         NovelInfoLoaded(
           novelInfo: novelInfo,
           volumes: _volumes,
-          readingHistory: readingHistory,
+          readingHistory: _listeningHistory ?? readingHistory,
         ),
       );
     } catch (e) {
@@ -159,18 +162,55 @@ class NovelInfoCubit extends Cubit<NovelInfoState> {
     return super.close();
   }
 
+  void acceptListeningPosition(ReadingProgress progress) {
+    if (isClosed || progress.bookId != novelId) return;
+    _historyGeneration++;
+    final history = _listeningHistory = progress.toHistory();
+    final current = state;
+    if (current is NovelInfoLoaded) {
+      emit(
+        NovelInfoLoaded(
+          novelInfo: current.novelInfo,
+          volumes: current.volumes,
+          readingHistory: history,
+        ),
+      );
+    }
+  }
+
   Future<void> loadHistory() async {
+    if (isClosed || state is! NovelInfoLoaded) return;
     final generation = _loadGeneration;
+    final historyGeneration = ++_historyGeneration;
+    final source = activeSource.value;
     final revision = sourceRevision.value;
-    final readingHistory = await _loadHistory(novelId: novelId);
-    if (isClosed || generation != _loadGeneration) return;
-    if (sourceOf(novelId) == SourceId.bili &&
-        (activeSource.value != SourceId.bili ||
-            sourceRevision.value != revision)) {
+    final session = w8.readerSessionGeneration(novelId);
+    final w8.ReadingHistory? readingHistory;
+    try {
+      readingHistory = await _loadHistory(
+        novelId: novelId,
+      ).timeout(const Duration(seconds: 2));
+    } catch (_) {
+      // Optional progress refresh must leave a usable detail page intact.
       return;
     }
-    if (state is NovelInfoLoaded) {
-      final currentState = state as NovelInfoLoaded;
+    if (isClosed ||
+        generation != _loadGeneration ||
+        historyGeneration != _historyGeneration ||
+        source != activeSource.value ||
+        revision != sourceRevision.value ||
+        session != w8.readerSessionGeneration(novelId)) {
+      return;
+    }
+    final currentState = state;
+    if (currentState is NovelInfoLoaded) {
+      _listeningHistory = null;
+      final previous = currentState.readingHistory;
+      if (previous?.chapterId == readingHistory?.chapterId &&
+          previous?.progressPage == readingHistory?.progressPage &&
+          previous?.progress == readingHistory?.progress) {
+        return;
+      }
       emit(
         NovelInfoLoaded(
           novelInfo: currentState.novelInfo,
