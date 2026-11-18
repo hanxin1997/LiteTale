@@ -385,9 +385,12 @@ void main() {
       expect(library.imports.count(EpubImportStatus.duplicate), 1);
       expect(library.imports.count(EpubImportStatus.failed), 1);
       expect(library.books, hasLength(100));
-      final id = library.imports.items.first.result!.book.id;
+      final book = library.imports.items.first.result!.book;
+      final id = book.id;
+      // The reader keeps the original archive in its private library.
+      final archive = File('${root.path}/local_epub/${book.digest}/publication.epub');
       expect(
-        await (await library.originalFileForOpening(id)).readAsBytes(),
+        await archive.readAsBytes(),
         first,
       );
       await library.organization.renameCollection(c.id, '重新分类');

@@ -91,7 +91,7 @@ void main() {
         loaded().pages[loaded().currentPageIndex].content,
         contains(anchor),
       );
-      await curl.setEnabled(false);
+      await curl.setEffect(ReaderPageEffect.slide);
       await tester.pump();
       expect(find.byType(PageCurlView), findsNothing);
       final before = loaded().currentPageIndex ~/ 2 * 2;
@@ -114,7 +114,7 @@ void main() {
         );
         expect(text.textScaler, loaded().layout.textScaler);
       }
-      await curl.setEnabled(true);
+      await curl.setEffect(ReaderPageEffect.nativeCurl);
       await waitFor(
         () =>
             find.byType(PageCurlView).evaluate().isNotEmpty &&

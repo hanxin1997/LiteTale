@@ -51,7 +51,7 @@ void main() {
       final reader = context.read<ReaderCubit>();
       final curl = context.read<ReaderCurlCubit>();
       ReaderLoaded loaded() => reader.state as ReaderLoaded;
-      await curl.setEnabled(false);
+      await curl.setEffect(ReaderPageEffect.slide);
       await tester.pump();
       final originalPages = loaded().pages;
       final physicalPage = loaded().currentPageIndex;
@@ -183,7 +183,7 @@ void main() {
         );
         expect(style.fontFamilyFallback, contains(appFontFamily));
       }
-      await curl.setEnabled(true);
+      await curl.setEffect(ReaderPageEffect.nativeCurl);
       await waitFor(
         () =>
             find.byType(PageCurlView).evaluate().isNotEmpty &&

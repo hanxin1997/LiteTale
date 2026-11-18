@@ -15,6 +15,7 @@ class _Browser extends WenkuWebView {
     required VoidCallback onLoaded,
     required void Function(String) onError,
     bool Function(String)? allowMainFrameNavigation,
+    VoidCallback? onNavigationBlocked,
     bool normalBrowserUserAgent = false,
     bool enableVerificationCookies = false,
   }) async {

@@ -86,7 +86,7 @@ Future<Widget> createTabletReaderFixture({FontSettingsCubit? fonts}) async {
     DeviceOrientation.landscapeLeft,
   ]);
   final curl = ReaderCurlCubit(read: () async => 'true', write: (_) async {});
-  await curl.setEnabled(true);
+  await curl.setEffect(ReaderPageEffect.nativeCurl);
   final theme = ThemeCubit();
   await theme.setThemeMode(ReaderThemeMode.dark);
   return MultiBlocProvider(
